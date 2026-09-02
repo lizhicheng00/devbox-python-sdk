@@ -199,9 +199,9 @@ Run the same smoke validation used by the PyCharm `DevBox Basic` configuration:
 python examples/validate_manager.py
 ```
 
-Set `DEVBOX_TEST_TEMPLATE` to exercise sandbox creation and lifecycle operations.
-Set `DEVBOX_STRICT_VALIDATION=1` when every documented Manager endpoint must be
-deployed; otherwise unavailable optional resource groups are reported as skipped.
+Set `DEVBOX_TEST_TEMPLATE` to a deployed template ID. The validator is strict:
+missing Manager endpoints, missing configuration, lifecycle failures, unavailable
+envd command routing, or unexpected command output produce a non-zero exit code.
 
 Command, filesystem, PTY, and Git operations require the Manager to return a real
 envd domain and access token. Placeholder connection fields are accepted when only

@@ -4,46 +4,35 @@ import os
 from collections.abc import Callable
 from typing import TypeVar
 
-from devbox import DevBox, DevBoxError, NetworkConfig, NotFoundError
+from devbox import CommandResult, DevBox, DevBoxError, NetworkConfig
 
 T = TypeVar("T")
 
 
-def check(
-    name: str, operation: Callable[[], T], *, optional: bool, strict: bool
-) -> tuple[bool, T | None]:
-    try:
-        result = operation()
-    except NotFoundError:
-        if optional and not strict:
-            print(f"SKIP {name}: endpoint is not available in this deployment")
-            return True, None
-        print(f"FAIL {name}: endpoint was not found")
-        return False, None
-    except DevBoxError as error:
-        print(f"FAIL {name}: HTTP {error.status_code or '-'} {error}")
-        return False, None
-    print(f"PASS {name}")
-    return True, result
-
-
 def main() -> None:
-    failures = 0
-    strict = os.getenv("DEVBOX_STRICT_VALIDATION") == "1"
+    failures: list[str] = []
 
-    def verify(name: str, operation: Callable[[], T], *, optional: bool = False) -> T | None:
-        nonlocal failures
-        passed, result = check(name, operation, optional=optional, strict=strict)
-        if not passed:
-            failures += 1
+    def verify(name: str, operation: Callable[[], T]) -> T | None:
+        try:
+            result = operation()
+        except (DevBoxError, ValueError) as error:
+            failures.append(name)
+            print(f"FAIL {name}: {error}")
+            return None
+        print(f"PASS {name}")
         return result
 
+    template_id = os.getenv("DEVBOX_TEST_TEMPLATE", "").strip()
+    if not template_id:
+        failures.append("configuration.template")
+        print("FAIL configuration.template: DEVBOX_TEST_TEMPLATE is required")
+
     with DevBox() as client:
-        health = verify("health", client.health, optional=True)
+        health = verify("health", client.health)
         sandboxes = verify("sandboxes.list", lambda: client.sandboxes.list(limit=20))
-        snapshots = verify("snapshots.list", lambda: client.snapshots.list(limit=20), optional=True)
-        templates = verify("templates.list", client.templates.list, optional=True)
-        nodes = verify("nodes.list", client.nodes.list, optional=True)
+        snapshots = verify("snapshots.list", lambda: client.snapshots.list(limit=20))
+        templates = verify("templates.list", client.templates.list)
+        nodes = verify("nodes.list", client.nodes.list)
 
         if health:
             print(f"  status={health.status}")
@@ -56,38 +45,64 @@ def main() -> None:
         if nodes is not None:
             print(f"  nodes={len(nodes)}")
 
-        template_id = os.getenv("DEVBOX_TEST_TEMPLATE")
-        if not template_id:
-            print("SKIP sandbox lifecycle: DEVBOX_TEST_TEMPLATE is not configured")
-        else:
-            sandbox = verify(
-                "sandboxes.create",
-                lambda: client.sandboxes.create(
-                    template_id,
-                    timeout=300,
-                    metadata={"sdk_validation": "true"},
-                    network=NetworkConfig(allow_internet_access=True),
-                ),
-            )
-            if sandbox:
-                try:
-                    verify("sandboxes.get", sandbox.get_info)
-                    verify("sandboxes.set_timeout", lambda: sandbox.set_timeout(300))
-                    verify("sandboxes.refresh", lambda: sandbox.refresh(300))
-                    verify("sandboxes.metrics", sandbox.get_metrics)
-                    verify("sandboxes.logs", lambda: sandbox.get_logs(limit=20))
-                    verify(
-                        "sandboxes.update_network",
-                        lambda: sandbox.update_network(NetworkConfig(allow_internet_access=True)),
-                    )
-                    verify("sandboxes.pause", sandbox.pause)
-                    verify("sandboxes.connect", lambda: sandbox.resume(timeout=300))
-                finally:
-                    verify("sandboxes.delete", sandbox.kill)
+        if template_id:
+            validate_sandbox(client, template_id, verify, failures)
 
     if failures:
-        raise SystemExit(f"Manager validation failed: {failures} check(s)")
+        names = ", ".join(failures)
+        print(f"Manager validation failed ({len(failures)}): {names}")
+        raise SystemExit(1)
     print("Manager validation passed")
+
+
+def validate_sandbox(
+    client: DevBox,
+    template_id: str,
+    verify: Callable[[str, Callable[[], T]], T | None],
+    failures: list[str],
+) -> None:
+    sandbox = verify(
+        "sandboxes.create",
+        lambda: client.sandboxes.create(
+            template_id,
+            timeout=300,
+            metadata={"sdk_validation": "true"},
+            network=NetworkConfig(allow_internet_access=True),
+        ),
+    )
+    if sandbox is None:
+        return
+
+    try:
+        verify("sandboxes.get", sandbox.get_info)
+        verify("sandboxes.set_timeout", lambda: sandbox.set_timeout(300))
+        verify("sandboxes.refresh", lambda: sandbox.refresh(300))
+        verify("sandboxes.metrics", sandbox.get_metrics)
+        verify(
+            "sandboxes.aggregate_metrics",
+            lambda: client.sandboxes.metrics([sandbox.sandbox_id]),
+        )
+        verify("sandboxes.logs", lambda: sandbox.get_logs(limit=20))
+        verify(
+            "sandboxes.update_network",
+            lambda: sandbox.update_network(NetworkConfig(allow_internet_access=True)),
+        )
+        verify("sandboxes.pause", sandbox.pause)
+        verify("sandboxes.connect", lambda: sandbox.resume(timeout=300))
+        result = verify(
+            "commands.run",
+            lambda: sandbox.commands.run("printf devbox-sdk-ready", check=False),
+        )
+        if result is not None and (
+            not isinstance(result, CommandResult) or result.stdout != "devbox-sdk-ready"
+        ):
+            failures.append("commands.output")
+            print("FAIL commands.output: unexpected command result")
+        elif result is not None:
+            print("PASS commands.output")
+    finally:
+        verify("sandboxes.delete", sandbox.kill)
+        sandbox.close()
 
 
 if __name__ == "__main__":
