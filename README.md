@@ -9,7 +9,7 @@ The SDK keeps the public API small while covering the first-phase workflow:
 - read, write, upload, download, inspect, and watch files;
 - open interactive PTY sessions;
 - run common Git workflows without putting credentials in command arguments;
-- create and build declarative templates;
+- manage templates, builds, snapshots, and compute nodes;
 - use the same capabilities from synchronous or asynchronous applications.
 
 ## Install
@@ -33,7 +33,7 @@ Create a sandbox and run a command:
 ```python
 from devbox import Sandbox
 
-with Sandbox.create(timeout=300) as sandbox:
+with Sandbox.create("python", timeout=300) as sandbox:
     result = sandbox.commands.run("python --version")
     print(result.stdout)
 
@@ -71,9 +71,6 @@ with DevBox() as client:
     sandbox.refresh()
 ```
 
-Create and connect are idempotency-aware. The SDK generates an idempotency key for
-each call unless one is supplied explicitly.
-
 Team snapshots can be paged independently with `client.snapshots.list()`.
 
 ## Async API
@@ -87,7 +84,7 @@ from devbox import AsyncSandbox
 
 
 async def main() -> None:
-    async with await AsyncSandbox.create() as sandbox:
+    async with await AsyncSandbox.create("python") as sandbox:
         result = await sandbox.commands.run("uname -a")
         print(result.stdout)
         await sandbox.kill()
@@ -175,26 +172,40 @@ They are not embedded in repository URLs or shell command arguments.
 
 ## Templates
 
-Template definitions are immutable, so a reusable base definition is not changed by
-later additions:
+Templates use the Manager service's template and build resources:
 
 ```python
 from devbox import DevBox, Template
 
-definition = (
-    Template.from_image("python:3.12-slim")
-    .set_env(PYTHONUNBUFFERED="1")
-    .add_file("print('ready')\n", "/opt/app/main.py")
-    .run("python -m compileall /opt/app")
-    .set_start_command("python /opt/app/main.py")
+definition = Template(
+    alias="python-app",
+    name="Python application",
+    vcpu=2,
+    ram_mb=2048,
+    start_command="python /opt/app/main.py",
 )
 
 with DevBox() as client:
-    template = client.templates.create(definition, alias="python-app")
-    build = client.templates.build(template.template_id)
-    for event in client.templates.get_build_logs(template.template_id, build.build_id):
-        print(event)
+    template = client.templates.create(definition)
+    build = client.templates.start_build(template.template_id, "build-id")
+    print(client.templates.get_build_logs(template.template_id, build.build_id))
 ```
+
+## Manager Validation
+
+Run the same smoke validation used by the PyCharm `DevBox Basic` configuration:
+
+```bash
+python examples/validate_manager.py
+```
+
+Set `DEVBOX_TEST_TEMPLATE` to exercise sandbox creation and lifecycle operations.
+Set `DEVBOX_STRICT_VALIDATION=1` when every documented Manager endpoint must be
+deployed; otherwise unavailable optional resource groups are reported as skipped.
+
+Command, filesystem, PTY, and Git operations require the Manager to return a real
+envd domain and access token. Placeholder connection fields are accepted when only
+control-plane lifecycle operations are used.
 
 ## Errors
 

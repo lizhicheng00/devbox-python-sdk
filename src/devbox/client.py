@@ -7,6 +7,9 @@ import httpx
 
 from ._transport import AsyncTransport, SyncTransport
 from .config import ConnectionConfig
+from .errors import ProtocolError
+from .models import HealthInfo
+from .nodes import AsyncNodes, Nodes
 from .sandbox import AsyncSandboxes, AsyncSnapshots, Sandboxes, Snapshots
 from .templates import AsyncTemplates, Templates
 
@@ -39,6 +42,13 @@ class DevBox:
         self.sandboxes = Sandboxes(self._transport, config.request_timeout)
         self.snapshots = Snapshots(self._transport)
         self.templates = Templates(self._transport)
+        self.nodes = Nodes(self._transport)
+
+    def health(self) -> HealthInfo:
+        payload = self._transport.request("GET", "/health")
+        if not isinstance(payload, dict):
+            raise ProtocolError("health response is invalid")
+        return HealthInfo.from_wire(payload)
 
     def close(self) -> None:
         self._transport.close()
@@ -83,6 +93,13 @@ class AsyncDevBox:
         self.sandboxes = AsyncSandboxes(self._transport, config.request_timeout)
         self.snapshots = AsyncSnapshots(self._transport)
         self.templates = AsyncTemplates(self._transport)
+        self.nodes = AsyncNodes(self._transport)
+
+    async def health(self) -> HealthInfo:
+        payload = await self._transport.request("GET", "/health")
+        if not isinstance(payload, dict):
+            raise ProtocolError("health response is invalid")
+        return HealthInfo.from_wire(payload)
 
     async def close(self) -> None:
         await self._transport.close()

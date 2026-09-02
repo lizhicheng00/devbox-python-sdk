@@ -42,12 +42,19 @@ class SyncTransport:
         headers: Mapping[str, str] | None = None,
     ) -> Any:
         response = self._send(method, path, json_body, params, headers)
-        if response.status_code == 204 or not response.content:
-            return None
-        try:
-            return response.json()
-        except ValueError as error:
-            raise ProtocolError("DevBox returned invalid JSON") from error
+        return _response_body(response)
+
+    def request_with_headers(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: object | None = None,
+        params: QueryParams | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> tuple[Any, httpx.Headers]:
+        response = self._send(method, path, json_body, params, headers)
+        return _response_body(response), response.headers
 
     def request_bytes(
         self,
@@ -141,12 +148,19 @@ class AsyncTransport:
         headers: Mapping[str, str] | None = None,
     ) -> Any:
         response = await self._send(method, path, json_body, params, headers)
-        if response.status_code == 204 or not response.content:
-            return None
-        try:
-            return response.json()
-        except ValueError as error:
-            raise ProtocolError("DevBox returned invalid JSON") from error
+        return _response_body(response)
+
+    async def request_with_headers(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: object | None = None,
+        params: QueryParams | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> tuple[Any, httpx.Headers]:
+        response = await self._send(method, path, json_body, params, headers)
+        return _response_body(response), response.headers
 
     async def request_bytes(
         self,
@@ -223,3 +237,12 @@ def _decode_event(line: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise ProtocolError("DevBox returned an invalid stream event")
     return value
+
+
+def _response_body(response: httpx.Response) -> Any:
+    if response.status_code == 204 or not response.content:
+        return None
+    try:
+        return response.json()
+    except ValueError as error:
+        raise ProtocolError("DevBox returned invalid JSON") from error

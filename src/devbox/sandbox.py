@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
-from types import TracebackType
 from typing import Any
 from urllib.parse import quote
 from uuid import uuid4
@@ -12,17 +11,21 @@ import httpx
 from ._transport import AsyncTransport, SyncTransport
 from .commands import AsyncCommands, Commands
 from .config import ConnectionConfig
-from .errors import ProtocolError
+from .errors import ErrorDetail, ProtocolError
 from .filesystem import AsyncFilesystem, Filesystem
 from .git import AsyncGit, Git
 from .models import (
+    LogLevel,
+    LogsDirection,
     NetworkConfig,
     Page,
     SandboxConnection,
     SandboxInfo,
+    SandboxLogEntry,
     SandboxMetrics,
     SandboxState,
     SnapshotInfo,
+    VolumeMount,
 )
 from .pty import AsyncPty, Pty
 
@@ -40,43 +43,76 @@ class Sandboxes:
         envs: Mapping[str, str] | None = None,
         metadata: Mapping[str, str] | None = None,
         network: NetworkConfig | None = None,
-        webhook_url: str | None = None,
+        auto_pause: bool = False,
+        auto_pause_memory: bool = True,
+        auto_resume: bool = False,
+        secure: bool = True,
+        client_id: str | None = None,
+        build_id: str | None = None,
+        volume_mounts: Sequence[VolumeMount] = (),
         idempotency_key: str | None = None,
     ) -> Sandbox:
-        body = _create_body(template, timeout, envs, metadata, network, webhook_url)
-        headers = {"Idempotency-Key": idempotency_key or str(uuid4())}
-        payload = self._transport.request("POST", "/sandboxes", json_body=body, headers=headers)
+        payload = self._transport.request(
+            "POST",
+            "/sandboxes",
+            json_body=_create_body(
+                template,
+                timeout,
+                envs,
+                metadata,
+                network,
+                auto_pause,
+                auto_pause_memory,
+                auto_resume,
+                secure,
+                client_id,
+                build_id,
+                volume_mounts,
+            ),
+            headers={"Idempotency-Key": idempotency_key or str(uuid4())},
+        )
         info, connection = _sandbox_payload(payload)
         return Sandbox(self._transport, info, connection, request_timeout=self._request_timeout)
 
-    def connect(self, sandbox_id: str, *, timeout: int | None = None) -> Sandbox:
+    def connect(self, sandbox_id: str, *, timeout: int = 300) -> Sandbox:
         payload = self._transport.request(
-            "POST", f"/sandboxes/{_id(sandbox_id)}/connect", json_body=_timeout_body(timeout)
+            "POST",
+            f"/sandboxes/{_id(sandbox_id)}/connect",
+            json_body={"timeout": _checked_timeout(timeout)},
         )
         info, connection = _sandbox_payload(payload)
         return Sandbox(self._transport, info, connection, request_timeout=self._request_timeout)
 
     def get(self, sandbox_id: str) -> SandboxInfo:
-        payload = self._transport.request("GET", f"/sandboxes/{_id(sandbox_id)}")
-        return SandboxInfo.from_wire(_mapping(payload))
+        return SandboxInfo.from_wire(
+            _mapping(self._transport.request("GET", f"/sandboxes/{_id(sandbox_id)}"))
+        )
 
     def list(
         self,
         *,
-        states: Sequence[SandboxState | str] | None = None,
+        metadata: str | None = None,
+        states: Sequence[SandboxState | str] = (),
         limit: int | None = None,
         next_token: str | None = None,
     ) -> Page[SandboxInfo]:
-        params: dict[str, str | int] = {}
-        if states:
-            params["state"] = ",".join(
-                state.value if isinstance(state, SandboxState) else state for state in states
+        payload, headers = self._transport.request_with_headers(
+            "GET", "/v2/sandboxes", params=_list_params(metadata, states, limit, next_token)
+        )
+        return _sandbox_page(payload, headers.get("X-Next-Token"), headers.get("X-Total-Running"))
+
+    def metrics(self, sandbox_ids: Sequence[str]) -> Mapping[str, SandboxMetrics]:
+        payload = _mapping(
+            self._transport.request(
+                "GET",
+                "/sandboxes/metrics",
+                params={"sandbox_ids": ",".join(_sandbox_ids(sandbox_ids))},
             )
-        if limit is not None:
-            params["limit"] = limit
-        if next_token:
-            params["nextToken"] = next_token
-        return _sandbox_page(self._transport.request("GET", "/sandboxes", params=params))
+        )
+        values = _mapping(payload.get("sandboxes", {}))
+        return {
+            str(key): SandboxMetrics.from_wire(_mapping(value)) for key, value in values.items()
+        }
 
 
 class AsyncSandboxes:
@@ -92,22 +128,44 @@ class AsyncSandboxes:
         envs: Mapping[str, str] | None = None,
         metadata: Mapping[str, str] | None = None,
         network: NetworkConfig | None = None,
-        webhook_url: str | None = None,
+        auto_pause: bool = False,
+        auto_pause_memory: bool = True,
+        auto_resume: bool = False,
+        secure: bool = True,
+        client_id: str | None = None,
+        build_id: str | None = None,
+        volume_mounts: Sequence[VolumeMount] = (),
         idempotency_key: str | None = None,
     ) -> AsyncSandbox:
-        body = _create_body(template, timeout, envs, metadata, network, webhook_url)
-        headers = {"Idempotency-Key": idempotency_key or str(uuid4())}
         payload = await self._transport.request(
-            "POST", "/sandboxes", json_body=body, headers=headers
+            "POST",
+            "/sandboxes",
+            json_body=_create_body(
+                template,
+                timeout,
+                envs,
+                metadata,
+                network,
+                auto_pause,
+                auto_pause_memory,
+                auto_resume,
+                secure,
+                client_id,
+                build_id,
+                volume_mounts,
+            ),
+            headers={"Idempotency-Key": idempotency_key or str(uuid4())},
         )
         info, connection = _sandbox_payload(payload)
         return AsyncSandbox(
             self._transport, info, connection, request_timeout=self._request_timeout
         )
 
-    async def connect(self, sandbox_id: str, *, timeout: int | None = None) -> AsyncSandbox:
+    async def connect(self, sandbox_id: str, *, timeout: int = 300) -> AsyncSandbox:
         payload = await self._transport.request(
-            "POST", f"/sandboxes/{_id(sandbox_id)}/connect", json_body=_timeout_body(timeout)
+            "POST",
+            f"/sandboxes/{_id(sandbox_id)}/connect",
+            json_body={"timeout": _checked_timeout(timeout)},
         )
         info, connection = _sandbox_payload(payload)
         return AsyncSandbox(
@@ -115,26 +173,35 @@ class AsyncSandboxes:
         )
 
     async def get(self, sandbox_id: str) -> SandboxInfo:
-        payload = await self._transport.request("GET", f"/sandboxes/{_id(sandbox_id)}")
-        return SandboxInfo.from_wire(_mapping(payload))
+        return SandboxInfo.from_wire(
+            _mapping(await self._transport.request("GET", f"/sandboxes/{_id(sandbox_id)}"))
+        )
 
     async def list(
         self,
         *,
-        states: Sequence[SandboxState | str] | None = None,
+        metadata: str | None = None,
+        states: Sequence[SandboxState | str] = (),
         limit: int | None = None,
         next_token: str | None = None,
     ) -> Page[SandboxInfo]:
-        params: dict[str, str | int] = {}
-        if states:
-            params["state"] = ",".join(
-                state.value if isinstance(state, SandboxState) else state for state in states
+        payload, headers = await self._transport.request_with_headers(
+            "GET", "/v2/sandboxes", params=_list_params(metadata, states, limit, next_token)
+        )
+        return _sandbox_page(payload, headers.get("X-Next-Token"), headers.get("X-Total-Running"))
+
+    async def metrics(self, sandbox_ids: Sequence[str]) -> Mapping[str, SandboxMetrics]:
+        payload = _mapping(
+            await self._transport.request(
+                "GET",
+                "/sandboxes/metrics",
+                params={"sandbox_ids": ",".join(_sandbox_ids(sandbox_ids))},
             )
-        if limit is not None:
-            params["limit"] = limit
-        if next_token:
-            params["nextToken"] = next_token
-        return _sandbox_page(await self._transport.request("GET", "/sandboxes", params=params))
+        )
+        values = _mapping(payload.get("sandboxes", {}))
+        return {
+            str(key): SandboxMetrics.from_wire(_mapping(value)) for key, value in values.items()
+        }
 
 
 class Snapshots:
@@ -142,14 +209,17 @@ class Snapshots:
         self._transport = transport
 
     def list(
-        self, *, limit: int | None = None, next_token: str | None = None
+        self,
+        *,
+        sandbox_id: str | None = None,
+        name: str | None = None,
+        limit: int | None = None,
+        next_token: str | None = None,
     ) -> Page[SnapshotInfo]:
-        params: dict[str, str | int] = {}
-        if limit is not None:
-            params["limit"] = limit
-        if next_token:
-            params["nextToken"] = next_token
-        return _snapshot_page(self._transport.request("GET", "/snapshots", params=params))
+        payload, headers = self._transport.request_with_headers(
+            "GET", "/snapshots", params=_snapshot_params(sandbox_id, name, limit, next_token)
+        )
+        return _snapshot_page(payload, headers.get("X-Next-Token"))
 
 
 class AsyncSnapshots:
@@ -157,19 +227,21 @@ class AsyncSnapshots:
         self._transport = transport
 
     async def list(
-        self, *, limit: int | None = None, next_token: str | None = None
+        self,
+        *,
+        sandbox_id: str | None = None,
+        name: str | None = None,
+        limit: int | None = None,
+        next_token: str | None = None,
     ) -> Page[SnapshotInfo]:
-        params: dict[str, str | int] = {}
-        if limit is not None:
-            params["limit"] = limit
-        if next_token:
-            params["nextToken"] = next_token
-        payload = await self._transport.request("GET", "/snapshots", params=params)
-        return _snapshot_page(payload)
+        payload, headers = await self._transport.request_with_headers(
+            "GET", "/snapshots", params=_snapshot_params(sandbox_id, name, limit, next_token)
+        )
+        return _snapshot_page(payload, headers.get("X-Next-Token"))
 
 
 class Sandbox:
-    """A connected synchronous sandbox."""
+    """Connected synchronous sandbox returned by the Manager API."""
 
     def __init__(
         self,
@@ -192,32 +264,14 @@ class Sandbox:
         self.git = Git(self.commands)
 
     @classmethod
-    def create(
-        cls,
-        template: str = "base",
-        *,
-        timeout: int = 300,
-        envs: Mapping[str, str] | None = None,
-        metadata: Mapping[str, str] | None = None,
-        network: NetworkConfig | None = None,
-        webhook_url: str | None = None,
-        api_key: str | None = None,
-        api_url: str | None = None,
-        request_timeout: float = 30.0,
-        idempotency_key: str | None = None,
-        http_transport: httpx.BaseTransport | None = None,
-    ) -> Sandbox:
+    def create(cls, template: str = "base", **kwargs: Any) -> Sandbox:
+        api_key = kwargs.pop("api_key", None)
+        api_url = kwargs.pop("api_url", None)
+        request_timeout = float(kwargs.pop("request_timeout", 30.0))
+        http_transport = kwargs.pop("http_transport", None)
         config, transport = _sync_control(api_key, api_url, request_timeout, http_transport)
         try:
-            sandbox = Sandboxes(transport, config.request_timeout).create(
-                template,
-                timeout=timeout,
-                envs=envs,
-                metadata=metadata,
-                network=network,
-                webhook_url=webhook_url,
-                idempotency_key=idempotency_key,
-            )
+            sandbox = Sandboxes(transport, config.request_timeout).create(template, **kwargs)
         except Exception:
             transport.close()
             raise
@@ -229,7 +283,7 @@ class Sandbox:
         cls,
         sandbox_id: str,
         *,
-        timeout: int | None = None,
+        timeout: int = 300,
         api_key: str | None = None,
         api_url: str | None = None,
         request_timeout: float = 30.0,
@@ -260,74 +314,86 @@ class Sandbox:
         )
         return self._info
 
-    def pause(self) -> bool:
-        result = self._control.request("POST", f"/sandboxes/{_id(self.sandbox_id)}/pause")
-        self._close_gateway()
-        return _changed(result)
-
-    def resume(self) -> bool:
-        result = self._control.request("POST", f"/sandboxes/{_id(self.sandbox_id)}/resume")
-        self._reconnect()
-        return _changed(result)
-
-    def set_timeout(self, timeout: int) -> None:
-        _validate_timeout(timeout)
+    def pause(self, *, memory: bool = True) -> None:
         self._control.request(
-            "POST", f"/sandboxes/{_id(self.sandbox_id)}/timeout", json_body={"timeout": timeout}
+            "POST", f"/sandboxes/{_id(self.sandbox_id)}/pause", json_body={"memory": memory}
+        )
+        self._close_gateway()
+
+    def resume(self, *, timeout: int = 300) -> None:
+        self._apply_connection(
+            self._control.request(
+                "POST",
+                f"/sandboxes/{_id(self.sandbox_id)}/connect",
+                json_body={"timeout": _checked_timeout(timeout)},
+            )
         )
 
-    def refresh(self) -> None:
-        self._control.request("POST", f"/sandboxes/{_id(self.sandbox_id)}/refresh")
+    def set_timeout(self, timeout: int) -> None:
+        self._control.request(
+            "POST",
+            f"/sandboxes/{_id(self.sandbox_id)}/timeout",
+            json_body={"timeout": _checked_timeout(timeout)},
+        )
 
-    def kill(self) -> bool:
-        result = self._control.request("DELETE", f"/sandboxes/{_id(self.sandbox_id)}")
+    def refresh(self, duration: int = 300) -> None:
+        self._control.request(
+            "POST",
+            f"/sandboxes/{_id(self.sandbox_id)}/refreshes",
+            json_body={"duration": _checked_timeout(duration)},
+        )
+
+    def kill(self) -> None:
+        self._control.request("DELETE", f"/sandboxes/{_id(self.sandbox_id)}")
         self._close_gateway()
-        return _changed(result)
 
-    def snapshot(self, *, idempotency_key: str | None = None) -> SnapshotInfo:
+    def snapshot(self, name: str | None = None) -> SnapshotInfo:
         payload = self._control.request(
             "POST",
-            f"/sandboxes/{_id(self.sandbox_id)}/snapshot",
-            headers={"Idempotency-Key": idempotency_key or str(uuid4())},
+            f"/sandboxes/{_id(self.sandbox_id)}/snapshots",
+            json_body={"name": name} if name else {},
         )
         return SnapshotInfo.from_wire(_mapping(payload))
 
-    def fork(self, *, timeout: int | None = None, idempotency_key: str | None = None) -> Sandbox:
+    def fork(self, *, timeout: int = 300, count: int = 1) -> tuple[SandboxForkResult, ...]:
         payload = self._control.request(
             "POST",
             f"/sandboxes/{_id(self.sandbox_id)}/fork",
-            json_body=_timeout_body(timeout),
-            headers={"Idempotency-Key": idempotency_key or str(uuid4())},
+            json_body=_fork_body(timeout, count),
         )
-        info, connection = _sandbox_payload(payload)
-        return Sandbox(
-            self._control,
-            info,
-            connection,
-            request_timeout=self._request_timeout,
+        return tuple(
+            _fork_result(item, self._control, self._request_timeout) for item in _items(payload)
         )
 
-    def get_logs(self) -> tuple[str, ...]:
-        payload = self._control.request("GET", f"/sandboxes/{_id(self.sandbox_id)}/logs")
-        if isinstance(payload, list):
-            return tuple(str(line) for line in payload)
-        body = _mapping(payload)
-        values = body.get("logs", body.get("items", []))
-        return tuple(str(line) for line in values) if isinstance(values, list) else ()
+    def get_logs(
+        self,
+        *,
+        cursor: int | None = None,
+        limit: int = 1000,
+        direction: LogsDirection | str | None = None,
+        level: LogLevel | str | None = None,
+        search: str | None = None,
+    ) -> tuple[SandboxLogEntry, ...]:
+        payload = _mapping(
+            self._control.request(
+                "GET",
+                f"/v2/sandboxes/{_id(self.sandbox_id)}/logs",
+                params=_log_params(cursor, limit, direction, level, search),
+            )
+        )
+        return tuple(SandboxLogEntry.from_wire(item) for item in _items(payload.get("logs", [])))
 
     def get_metrics(
-        self, *, start: datetime | None = None, end: datetime | None = None
+        self, *, start: int | datetime | None = None, end: int | datetime | None = None
     ) -> tuple[SandboxMetrics, ...]:
         payload = self._control.request(
-            "GET", f"/sandboxes/{_id(self.sandbox_id)}/metrics", params=_time_range(start, end)
+            "GET", f"/sandboxes/{_id(self.sandbox_id)}/metrics", params=_metric_params(start, end)
         )
-        return tuple(SandboxMetrics.from_wire(item) for item in _items(payload, "metrics"))
+        return tuple(SandboxMetrics.from_wire(item) for item in _items(payload))
 
     def update_network(self, network: NetworkConfig) -> None:
         self._control.request(
-            "PUT",
-            f"/sandboxes/{_id(self.sandbox_id)}/network",
-            json_body=network.to_wire(),
+            "PUT", f"/sandboxes/{_id(self.sandbox_id)}/network", json_body=network.to_update_wire()
         )
 
     def close(self) -> None:
@@ -338,17 +404,14 @@ class Sandbox:
     def __enter__(self) -> Sandbox:
         return self
 
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_value: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> None:
+    def __exit__(self, *args: object) -> None:
         self.close()
 
     def _gateway_transport(self) -> SyncTransport:
+        if not self._connection.gateway_url:
+            raise ProtocolError("sandbox response does not provide an envd endpoint")
         if _expires_soon(self._connection.expires_at):
-            self._reconnect()
+            self.resume()
         if self._gateway is None:
             self._gateway = SyncTransport(
                 self._connection.gateway_url,
@@ -357,11 +420,8 @@ class Sandbox:
             )
         return self._gateway
 
-    def _reconnect(self) -> None:
-        payload = self._control.request("POST", f"/sandboxes/{_id(self.sandbox_id)}/connect")
-        info, connection = _sandbox_payload(payload)
-        self._info = info
-        self._connection = connection
+    def _apply_connection(self, payload: object) -> None:
+        self._info, self._connection = _sandbox_payload(payload)
         self._close_gateway()
 
     def _close_gateway(self) -> None:
@@ -371,7 +431,7 @@ class Sandbox:
 
 
 class AsyncSandbox:
-    """A connected asynchronous sandbox."""
+    """Connected asynchronous sandbox returned by the Manager API."""
 
     def __init__(
         self,
@@ -394,31 +454,15 @@ class AsyncSandbox:
         self.git = AsyncGit(self.commands)
 
     @classmethod
-    async def create(
-        cls,
-        template: str = "base",
-        *,
-        timeout: int = 300,
-        envs: Mapping[str, str] | None = None,
-        metadata: Mapping[str, str] | None = None,
-        network: NetworkConfig | None = None,
-        webhook_url: str | None = None,
-        api_key: str | None = None,
-        api_url: str | None = None,
-        request_timeout: float = 30.0,
-        idempotency_key: str | None = None,
-        http_transport: httpx.AsyncBaseTransport | None = None,
-    ) -> AsyncSandbox:
+    async def create(cls, template: str = "base", **kwargs: Any) -> AsyncSandbox:
+        api_key = kwargs.pop("api_key", None)
+        api_url = kwargs.pop("api_url", None)
+        request_timeout = float(kwargs.pop("request_timeout", 30.0))
+        http_transport = kwargs.pop("http_transport", None)
         config, transport = _async_control(api_key, api_url, request_timeout, http_transport)
         try:
             sandbox = await AsyncSandboxes(transport, config.request_timeout).create(
-                template,
-                timeout=timeout,
-                envs=envs,
-                metadata=metadata,
-                network=network,
-                webhook_url=webhook_url,
-                idempotency_key=idempotency_key,
+                template, **kwargs
             )
         except Exception:
             await transport.close()
@@ -431,7 +475,7 @@ class AsyncSandbox:
         cls,
         sandbox_id: str,
         *,
-        timeout: int | None = None,
+        timeout: int = 300,
         api_key: str | None = None,
         api_url: str | None = None,
         request_timeout: float = 30.0,
@@ -462,76 +506,89 @@ class AsyncSandbox:
         )
         return self._info
 
-    async def pause(self) -> bool:
-        result = await self._control.request("POST", f"/sandboxes/{_id(self.sandbox_id)}/pause")
-        await self._close_gateway()
-        return _changed(result)
-
-    async def resume(self) -> bool:
-        result = await self._control.request("POST", f"/sandboxes/{_id(self.sandbox_id)}/resume")
-        await self._reconnect()
-        return _changed(result)
-
-    async def set_timeout(self, timeout: int) -> None:
-        _validate_timeout(timeout)
+    async def pause(self, *, memory: bool = True) -> None:
         await self._control.request(
-            "POST", f"/sandboxes/{_id(self.sandbox_id)}/timeout", json_body={"timeout": timeout}
+            "POST", f"/sandboxes/{_id(self.sandbox_id)}/pause", json_body={"memory": memory}
+        )
+        await self._close_gateway()
+
+    async def resume(self, *, timeout: int = 300) -> None:
+        await self._apply_connection(
+            await self._control.request(
+                "POST",
+                f"/sandboxes/{_id(self.sandbox_id)}/connect",
+                json_body={"timeout": _checked_timeout(timeout)},
+            )
         )
 
-    async def refresh(self) -> None:
-        await self._control.request("POST", f"/sandboxes/{_id(self.sandbox_id)}/refresh")
+    async def set_timeout(self, timeout: int) -> None:
+        await self._control.request(
+            "POST",
+            f"/sandboxes/{_id(self.sandbox_id)}/timeout",
+            json_body={"timeout": _checked_timeout(timeout)},
+        )
 
-    async def kill(self) -> bool:
-        result = await self._control.request("DELETE", f"/sandboxes/{_id(self.sandbox_id)}")
+    async def refresh(self, duration: int = 300) -> None:
+        await self._control.request(
+            "POST",
+            f"/sandboxes/{_id(self.sandbox_id)}/refreshes",
+            json_body={"duration": _checked_timeout(duration)},
+        )
+
+    async def kill(self) -> None:
+        await self._control.request("DELETE", f"/sandboxes/{_id(self.sandbox_id)}")
         await self._close_gateway()
-        return _changed(result)
 
-    async def snapshot(self, *, idempotency_key: str | None = None) -> SnapshotInfo:
+    async def snapshot(self, name: str | None = None) -> SnapshotInfo:
         payload = await self._control.request(
             "POST",
-            f"/sandboxes/{_id(self.sandbox_id)}/snapshot",
-            headers={"Idempotency-Key": idempotency_key or str(uuid4())},
+            f"/sandboxes/{_id(self.sandbox_id)}/snapshots",
+            json_body={"name": name} if name else {},
         )
         return SnapshotInfo.from_wire(_mapping(payload))
 
     async def fork(
-        self, *, timeout: int | None = None, idempotency_key: str | None = None
-    ) -> AsyncSandbox:
+        self, *, timeout: int = 300, count: int = 1
+    ) -> tuple[AsyncSandboxForkResult, ...]:
         payload = await self._control.request(
             "POST",
             f"/sandboxes/{_id(self.sandbox_id)}/fork",
-            json_body=_timeout_body(timeout),
-            headers={"Idempotency-Key": idempotency_key or str(uuid4())},
+            json_body=_fork_body(timeout, count),
         )
-        info, connection = _sandbox_payload(payload)
-        return AsyncSandbox(
-            self._control,
-            info,
-            connection,
-            request_timeout=self._request_timeout,
+        return tuple(
+            _async_fork_result(item, self._control, self._request_timeout)
+            for item in _items(payload)
         )
 
-    async def get_logs(self) -> tuple[str, ...]:
-        payload = await self._control.request("GET", f"/sandboxes/{_id(self.sandbox_id)}/logs")
-        if isinstance(payload, list):
-            return tuple(str(line) for line in payload)
-        body = _mapping(payload)
-        values = body.get("logs", body.get("items", []))
-        return tuple(str(line) for line in values) if isinstance(values, list) else ()
+    async def get_logs(
+        self,
+        *,
+        cursor: int | None = None,
+        limit: int = 1000,
+        direction: LogsDirection | str | None = None,
+        level: LogLevel | str | None = None,
+        search: str | None = None,
+    ) -> tuple[SandboxLogEntry, ...]:
+        payload = _mapping(
+            await self._control.request(
+                "GET",
+                f"/v2/sandboxes/{_id(self.sandbox_id)}/logs",
+                params=_log_params(cursor, limit, direction, level, search),
+            )
+        )
+        return tuple(SandboxLogEntry.from_wire(item) for item in _items(payload.get("logs", [])))
 
     async def get_metrics(
-        self, *, start: datetime | None = None, end: datetime | None = None
+        self, *, start: int | datetime | None = None, end: int | datetime | None = None
     ) -> tuple[SandboxMetrics, ...]:
         payload = await self._control.request(
-            "GET", f"/sandboxes/{_id(self.sandbox_id)}/metrics", params=_time_range(start, end)
+            "GET", f"/sandboxes/{_id(self.sandbox_id)}/metrics", params=_metric_params(start, end)
         )
-        return tuple(SandboxMetrics.from_wire(item) for item in _items(payload, "metrics"))
+        return tuple(SandboxMetrics.from_wire(item) for item in _items(payload))
 
     async def update_network(self, network: NetworkConfig) -> None:
         await self._control.request(
-            "PUT",
-            f"/sandboxes/{_id(self.sandbox_id)}/network",
-            json_body=network.to_wire(),
+            "PUT", f"/sandboxes/{_id(self.sandbox_id)}/network", json_body=network.to_update_wire()
         )
 
     async def close(self) -> None:
@@ -542,17 +599,14 @@ class AsyncSandbox:
     async def __aenter__(self) -> AsyncSandbox:
         return self
 
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_value: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> None:
+    async def __aexit__(self, *args: object) -> None:
         await self.close()
 
     async def _gateway_transport(self) -> AsyncTransport:
+        if not self._connection.gateway_url:
+            raise ProtocolError("sandbox response does not provide an envd endpoint")
         if _expires_soon(self._connection.expires_at):
-            await self._reconnect()
+            await self.resume()
         if self._gateway is None:
             self._gateway = AsyncTransport(
                 self._connection.gateway_url,
@@ -561,17 +615,26 @@ class AsyncSandbox:
             )
         return self._gateway
 
-    async def _reconnect(self) -> None:
-        payload = await self._control.request("POST", f"/sandboxes/{_id(self.sandbox_id)}/connect")
-        info, connection = _sandbox_payload(payload)
-        self._info = info
-        self._connection = connection
+    async def _apply_connection(self, payload: object) -> None:
+        self._info, self._connection = _sandbox_payload(payload)
         await self._close_gateway()
 
     async def _close_gateway(self) -> None:
         if self._gateway is not None:
             await self._gateway.close()
             self._gateway = None
+
+
+class SandboxForkResult:
+    def __init__(self, sandbox: Sandbox | None, error: ErrorDetail | None) -> None:
+        self.sandbox = sandbox
+        self.error = error
+
+
+class AsyncSandboxForkResult:
+    def __init__(self, sandbox: AsyncSandbox | None, error: ErrorDetail | None) -> None:
+        self.sandbox = sandbox
+        self.error = error
 
 
 def _sync_control(
@@ -583,13 +646,12 @@ def _sync_control(
     config = ConnectionConfig.resolve(
         api_key=api_key, api_url=api_url, request_timeout=request_timeout
     )
-    transport = SyncTransport(
+    return config, SyncTransport(
         config.api_url,
         headers={**config.headers, "X-API-Key": config.api_key},
         timeout=config.request_timeout,
         transport=http_transport,
     )
-    return config, transport
 
 
 def _async_control(
@@ -601,13 +663,12 @@ def _async_control(
     config = ConnectionConfig.resolve(
         api_key=api_key, api_url=api_url, request_timeout=request_timeout
     )
-    transport = AsyncTransport(
+    return config, AsyncTransport(
         config.api_url,
         headers={**config.headers, "X-API-Key": config.api_key},
         timeout=config.request_timeout,
         transport=http_transport,
     )
-    return config, transport
 
 
 def _create_body(
@@ -616,66 +677,168 @@ def _create_body(
     envs: Mapping[str, str] | None,
     metadata: Mapping[str, str] | None,
     network: NetworkConfig | None,
-    webhook_url: str | None,
+    auto_pause: bool,
+    auto_pause_memory: bool,
+    auto_resume: bool,
+    secure: bool,
+    client_id: str | None,
+    build_id: str | None,
+    volume_mounts: Sequence[VolumeMount],
 ) -> dict[str, object]:
-    _validate_timeout(timeout)
     if not template.strip():
         raise ValueError("template must not be blank")
     resolved_network = network or NetworkConfig()
     body: dict[str, object] = {
         "templateID": template,
-        "timeout": timeout,
-        "envVars": dict(envs or {}),
-        "metadata": dict(metadata or {}),
-        "secure": True,
+        "timeout": _checked_timeout(timeout),
+        "autoPause": auto_pause,
+        "autoPauseMemory": auto_pause_memory,
+        "autoResume": {"enabled": auto_resume},
+        "secure": secure,
         "allow_internet_access": resolved_network.allow_internet_access,
-        "network": {"allowPublicTraffic": resolved_network.allow_public_traffic},
+        "network": resolved_network.to_create_wire(),
+        "metadata": dict(metadata or {}),
+        "envVars": dict(envs or {}),
+        "volumeMounts": [item.to_wire() for item in volume_mounts],
     }
-    if webhook_url:
-        body["webhookUrl"] = webhook_url
+    if client_id:
+        body["clientID"] = client_id
+    if build_id:
+        body["buildID"] = build_id
     return body
 
 
 def _sandbox_payload(value: object) -> tuple[SandboxInfo, SandboxConnection]:
     payload = _mapping(value)
-    raw_sandbox = payload.get("sandbox", payload)
-    sandbox = _mapping(raw_sandbox)
+    sandbox = _mapping(payload.get("sandbox", payload))
     info = SandboxInfo.from_wire(sandbox)
-    raw_connection = payload.get("connection", sandbox.get("connection", sandbox))
-    if not isinstance(raw_connection, Mapping):
-        raise ProtocolError("sandbox response does not contain connection details")
-    return info, SandboxConnection.from_wire(raw_connection, info.sandbox_id)
+    connection = payload.get("connection", sandbox.get("connection", sandbox))
+    return info, SandboxConnection.from_wire(_mapping(connection), info.sandbox_id)
 
 
-def _sandbox_page(value: object) -> Page[SandboxInfo]:
-    if isinstance(value, list):
-        return Page(tuple(SandboxInfo.from_wire(_mapping(item)) for item in value))
-    payload = _mapping(value)
+def _sandbox_page(value: object, next_token: str | None, total: str | None) -> Page[SandboxInfo]:
     return Page(
-        tuple(SandboxInfo.from_wire(item) for item in _items(payload, "sandboxes")),
-        str(payload["nextToken"]) if payload.get("nextToken") else None,
+        tuple(SandboxInfo.from_wire(item) for item in _items(value)),
+        next_token or None,
+        int(total) if total else None,
     )
 
 
-def _snapshot_page(value: object) -> Page[SnapshotInfo]:
-    if isinstance(value, list):
-        return Page(tuple(SnapshotInfo.from_wire(_mapping(item)) for item in value))
-    payload = _mapping(value)
-    return Page(
-        tuple(SnapshotInfo.from_wire(item) for item in _items(payload, "snapshots")),
-        str(payload["nextToken"]) if payload.get("nextToken") else None,
-    )
+def _snapshot_page(value: object, next_token: str | None) -> Page[SnapshotInfo]:
+    return Page(tuple(SnapshotInfo.from_wire(item) for item in _items(value)), next_token or None)
 
 
-def _items(value: object, key: str) -> tuple[Mapping[str, Any], ...]:
-    if isinstance(value, list):
-        source = value
-    else:
-        payload = _mapping(value)
-        source = payload.get(key, payload.get("items", []))
-    if not isinstance(source, list):
+def _list_params(
+    metadata: str | None,
+    states: Sequence[SandboxState | str],
+    limit: int | None,
+    next_token: str | None,
+) -> dict[str, str | int]:
+    params: dict[str, str | int] = {}
+    if metadata:
+        params["metadata"] = metadata
+    if states:
+        params["state"] = ",".join(
+            item.value if isinstance(item, SandboxState) else item for item in states
+        )
+    if limit is not None:
+        if not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
+        params["limit"] = limit
+    if next_token:
+        params["nextToken"] = next_token
+    return params
+
+
+def _snapshot_params(
+    sandbox_id: str | None, name: str | None, limit: int | None, next_token: str | None
+) -> dict[str, str | int]:
+    params: dict[str, str | int] = {}
+    for key, value in (("sandboxID", sandbox_id), ("name", name), ("nextToken", next_token)):
+        if value:
+            params[key] = value
+    if limit is not None:
+        params["limit"] = limit
+    return params
+
+
+def _log_params(
+    cursor: int | None,
+    limit: int,
+    direction: LogsDirection | str | None,
+    level: LogLevel | str | None,
+    search: str | None,
+) -> dict[str, str | int]:
+    if not 0 <= limit <= 1000:
+        raise ValueError("limit must be between 0 and 1000")
+    if search is not None and len(search) > 256:
+        raise ValueError("search must not exceed 256 characters")
+    params: dict[str, str | int] = {"limit": limit}
+    if cursor is not None:
+        params["cursor"] = cursor
+    if direction:
+        params["direction"] = direction.value if isinstance(direction, LogsDirection) else direction
+    if level:
+        params["level"] = level.value if isinstance(level, LogLevel) else level
+    if search:
+        params["search"] = search
+    return params
+
+
+def _metric_params(start: int | datetime | None, end: int | datetime | None) -> dict[str, int]:
+    params: dict[str, int] = {}
+    if start is not None:
+        params["start"] = int(start.timestamp()) if isinstance(start, datetime) else start
+    if end is not None:
+        params["end"] = int(end.timestamp()) if isinstance(end, datetime) else end
+    return params
+
+
+def _fork_body(timeout: int, count: int) -> dict[str, int]:
+    if not 1 <= count <= 100:
+        raise ValueError("count must be between 1 and 100")
+    return {"timeout": _checked_timeout(timeout), "count": count}
+
+
+def _fork_result(
+    value: Mapping[str, Any], control: SyncTransport, request_timeout: float
+) -> SandboxForkResult:
+    raw = value.get("sandbox")
+    sandbox = None
+    if isinstance(raw, Mapping):
+        info, connection = _sandbox_payload(raw)
+        sandbox = Sandbox(control, info, connection, request_timeout=request_timeout)
+    return SandboxForkResult(sandbox, _error_detail(value.get("error")))
+
+
+def _async_fork_result(
+    value: Mapping[str, Any], control: AsyncTransport, request_timeout: float
+) -> AsyncSandboxForkResult:
+    raw = value.get("sandbox")
+    sandbox = None
+    if isinstance(raw, Mapping):
+        info, connection = _sandbox_payload(raw)
+        sandbox = AsyncSandbox(control, info, connection, request_timeout=request_timeout)
+    return AsyncSandboxForkResult(sandbox, _error_detail(value.get("error")))
+
+
+def _error_detail(value: object) -> ErrorDetail | None:
+    if not isinstance(value, Mapping):
+        return None
+    return ErrorDetail(str(value.get("error", "")), str(value.get("message", "")))
+
+
+def _sandbox_ids(values: Sequence[str]) -> tuple[str, ...]:
+    ids = tuple(dict.fromkeys(value for value in values if value))
+    if not ids or len(ids) > 100:
+        raise ValueError("sandbox_ids must contain between 1 and 100 unique IDs")
+    return ids
+
+
+def _items(value: object) -> tuple[Mapping[str, Any], ...]:
+    if not isinstance(value, list | tuple):
         raise ProtocolError("DevBox returned an invalid list response")
-    return tuple(_mapping(item) for item in source)
+    return tuple(_mapping(item) for item in value)
 
 
 def _mapping(value: object) -> Mapping[str, Any]:
@@ -684,51 +847,21 @@ def _mapping(value: object) -> Mapping[str, Any]:
     return value
 
 
-def _timeout_body(timeout: int | None) -> dict[str, int]:
-    if timeout is None:
-        return {}
-    _validate_timeout(timeout)
-    return {"timeout": timeout}
-
-
-def _validate_timeout(timeout: int) -> None:
-    if timeout < 1 or timeout > 3600:
-        raise ValueError("timeout must be between 1 and 3600 seconds")
+def _checked_timeout(timeout: int) -> int:
+    if not 0 <= timeout <= 3600:
+        raise ValueError("timeout must be between 0 and 3600 seconds")
+    return timeout
 
 
 def _id(value: str) -> str:
     if not value:
-        raise ValueError("sandbox_id must not be blank")
+        raise ValueError("identifier must not be blank")
     return quote(value, safe="")
 
 
-def _changed(value: object) -> bool:
-    if value is None:
-        return True
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, Mapping):
-        return bool(value.get("changed", value.get("success", True)))
-    return True
-
-
 def _gateway_headers(connection: SandboxConnection) -> dict[str, str]:
-    return {
-        "Authorization": f"Bearer {connection.access_token}",
-        "E2B-Sandbox-Id": connection.sandbox_id,
-    }
+    return {"X-Access-Token": connection.access_token, "E2B-Sandbox-Id": connection.sandbox_id}
 
 
 def _expires_soon(expires_at: datetime | None) -> bool:
-    if expires_at is None:
-        return False
-    return expires_at <= datetime.now(timezone.utc) + timedelta(seconds=30)
-
-
-def _time_range(start: datetime | None, end: datetime | None) -> dict[str, str]:
-    params: dict[str, str] = {}
-    if start:
-        params["start"] = start.astimezone(timezone.utc).isoformat()
-    if end:
-        params["end"] = end.astimezone(timezone.utc).isoformat()
-    return params
+    return bool(expires_at and expires_at <= datetime.now(timezone.utc) + timedelta(seconds=30))

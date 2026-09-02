@@ -108,13 +108,15 @@ def raise_for_response(response: httpx.Response) -> NoReturn:
         pass
 
     raw_error = payload.get("error", payload)
-    error = raw_error if isinstance(raw_error, Mapping) else {}
+    error = raw_error if isinstance(raw_error, Mapping) else payload
     message = str(
         error.get("message")
         or error.get("error_message")
         or f"request failed with status {response.status_code}"
     )
-    code = str(error.get("code") or error.get("error_code") or response.status_code)
+    code = str(
+        error.get("code") or error.get("error_code") or error.get("error") or response.status_code
+    )
     target = str(error["target"]) if error.get("target") is not None else None
     details = _details(error.get("details"))
     request_id = response.headers.get("X-Request-Id") or response.headers.get("X-Request-ID")
