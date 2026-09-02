@@ -209,10 +209,11 @@ control-plane lifecycle operations are used.
 
 ## Interactive Console
 
-Run `examples/interactive_console.py` from PyCharm to enter Linux commands one at a
-time. Enter an existing sandbox ID, or leave it empty and enter a template ID to
-create a temporary sandbox. Use `:help` to list lifecycle commands. A sandbox created
-by the console is deleted on exit unless `:detach` is used.
+Run `examples/interactive_console.py` from PyCharm for a zero-input runtime check.
+It creates a sandbox from `DEVBOX_TEST_TEMPLATE` (default: `default`), validates
+foreground and background commands, process listing, and filesystem operations,
+then deletes the test sandbox. Set `DEVBOX_SANDBOX_ID` only when an existing sandbox
+should be reused instead.
 
 ## Errors
 

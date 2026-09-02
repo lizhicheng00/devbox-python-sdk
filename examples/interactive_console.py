@@ -2,110 +2,127 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Mapping
 
-from devbox import CommandExitError, DevBoxError, ProtocolError, Sandbox
+from devbox import CommandHandle, CommandResult, DevBoxError, Sandbox
 
 
 def main() -> None:
-    sandbox_id = (
-        os.getenv("DEVBOX_SANDBOX_ID")
-        or input("Existing sandbox ID (Enter to create one): ").strip()
-    )
+    sandbox_id = os.getenv("DEVBOX_SANDBOX_ID", "").strip()
     created = not sandbox_id
+    template = os.getenv("DEVBOX_TEST_TEMPLATE", "default")
+
     try:
-        sandbox = connect(sandbox_id) if sandbox_id else create()
+        sandbox = (
+            Sandbox.connect(sandbox_id, timeout=300)
+            if sandbox_id
+            else Sandbox.create(template, timeout=300, metadata={"sdk_validation": "true"})
+        )
     except DevBoxError as error:
         raise SystemExit(f"Unable to open sandbox: {error}") from None
-    keep = not created
 
-    print(f"Connected to sandbox {sandbox.sandbox_id}")
-    print("Enter a Linux command, or :help for console commands.")
+    print(f"Sandbox ready: {sandbox.sandbox_id}")
     try:
-        while True:
-            command = input("devbox> ").strip()
-            if not command:
-                continue
-            if command == ":help":
-                show_help()
-            elif command == ":info":
-                print(sandbox.get_info())
-            elif command == ":processes":
-                for process in sandbox.commands.list():
-                    print(process)
-            elif command.startswith(":timeout "):
-                sandbox.set_timeout(int(command.split(maxsplit=1)[1]))
-                print("Timeout updated")
-            elif command.startswith(":refresh "):
-                sandbox.refresh(int(command.split(maxsplit=1)[1]))
-                print("Sandbox refreshed")
-            elif command == ":pause":
-                sandbox.pause()
-                print("Sandbox paused")
-            elif command == ":resume":
-                sandbox.resume()
-                print("Sandbox resumed")
-            elif command == ":detach":
-                keep = True
-                break
-            elif command == ":kill":
-                sandbox.kill()
-                keep = True
-                print("Sandbox deleted")
-                break
-            elif command in {":exit", ":quit"}:
-                break
-            else:
-                run(sandbox, command)
-    except (EOFError, KeyboardInterrupt):
-        print()
+        validate_commands(sandbox)
+        validate_filesystem(sandbox)
+        print("Sandbox runtime validation passed")
+    except (DevBoxError, AssertionError, ValueError) as error:
+        raise SystemExit(f"Sandbox runtime validation failed: {error}") from None
     finally:
-        if not keep:
-            sandbox.kill()
-            print(f"Deleted test sandbox {sandbox.sandbox_id}")
+        if created:
+            try:
+                sandbox.kill()
+                print(f"Deleted test sandbox: {sandbox.sandbox_id}")
+            except DevBoxError as error:
+                print(f"Failed to delete test sandbox: {error}", file=sys.stderr)
         sandbox.close()
 
 
-def create() -> Sandbox:
-    template = os.getenv("DEVBOX_TEST_TEMPLATE") or input("Template ID: ").strip()
-    if not template:
-        raise SystemExit("A template ID is required to create a sandbox")
-    return Sandbox.create(template, timeout=300, metadata={"sdk_console": "true"})
-
-
-def connect(sandbox_id: str) -> Sandbox:
-    return Sandbox.connect(sandbox_id, timeout=300)
-
-
-def run(sandbox: Sandbox, command: str) -> None:
-    try:
-        result = sandbox.commands.run(
-            command,
-            on_stdout=lambda value: print(value, end="", flush=True),
-            on_stderr=lambda value: print(value, end="", file=sys.stderr, flush=True),
-            check=False,
-        )
-        print(f"[exit {result.exit_code}]")
-    except ProtocolError as error:
-        print(f"Command channel unavailable: {error}")
-    except (CommandExitError, DevBoxError) as error:
-        print(f"Command failed: {error}")
-
-
-def show_help() -> None:
-    print(
-        "\n".join(
-            (
-                ":info             Show sandbox details",
-                ":processes        List running processes",
-                ":timeout <sec>    Reset sandbox timeout",
-                ":refresh <sec>    Extend sandbox lifetime",
-                ":pause / :resume  Change sandbox state",
-                ":detach           Exit and keep the sandbox",
-                ":kill             Delete the sandbox and exit",
-                ":exit             Exit; a sandbox created here is deleted",
-            )
-        )
+def validate_commands(sandbox: Sandbox) -> None:
+    run(sandbox, "working directory", "pwd")
+    run(sandbox, "system information", "uname -a")
+    run(sandbox, "Python runtime", "python3 --version || python --version")
+    run(
+        sandbox,
+        "environment",
+        'printf "$DEVBOX_SDK_TEST"',
+        envs={"DEVBOX_SDK_TEST": "env-ok"},
+        expected_stdout="env-ok",
     )
+    run(sandbox, "working directory option", "pwd", cwd="/tmp", expected_stdout="/tmp")
+    run(
+        sandbox,
+        "stderr and exit code",
+        "printf 'stderr-ok\\n' >&2; exit 7",
+        expected_stderr="stderr-ok\n",
+        expected_exit=7,
+    )
+
+    print("\n== background process ==")
+    handle = sandbox.commands.run("sleep 1; printf background-ok", background=True)
+    if not isinstance(handle, CommandHandle):
+        raise AssertionError("background command did not return a process handle")
+    print(f"pid={handle.pid}")
+    processes = sandbox.commands.list()
+    if handle.pid not in {process.pid for process in processes}:
+        raise AssertionError("background process is missing from process list")
+    result = handle.wait(check=False)
+    print_result(result)
+    if result.exit_code != 0 or result.stdout != "background-ok":
+        raise AssertionError("background command returned an unexpected result")
+
+
+def validate_filesystem(sandbox: Sandbox) -> None:
+    print("\n== filesystem ==")
+    directory = "/tmp/devbox-sdk-validation"
+    path = f"{directory}/message.txt"
+    sandbox.files.make_dir(directory)
+    info = sandbox.files.write(path, "filesystem-ok")
+    print(f"write: {info.path} size={info.size}")
+    content = sandbox.files.read(path)
+    print(f"read: {content}")
+    if content != "filesystem-ok":
+        raise AssertionError("filesystem content does not match")
+    print(f"stat: {sandbox.files.stat(path)}")
+    print(f"list: {sandbox.files.list(directory)}")
+    sandbox.files.remove(directory, recursive=True)
+    print("remove: ok")
+
+
+def run(
+    sandbox: Sandbox,
+    name: str,
+    command: str,
+    *,
+    envs: Mapping[str, str] | None = None,
+    cwd: str | None = None,
+    expected_stdout: str | None = None,
+    expected_stderr: str | None = None,
+    expected_exit: int = 0,
+) -> None:
+    print(f"\n== {name} ==")
+    print(f"$ {command}")
+    result = sandbox.commands.run(
+        command,
+        envs=envs,
+        cwd=cwd,
+        on_stdout=lambda value: print(value, end="", flush=True),
+        on_stderr=lambda value: print(value, end="", file=sys.stderr, flush=True),
+        check=False,
+    )
+    if not isinstance(result, CommandResult):
+        raise AssertionError("foreground command returned a process handle")
+    print_result(result)
+    if result.exit_code != expected_exit:
+        raise AssertionError(f"expected exit {expected_exit}, got {result.exit_code}")
+    if expected_stdout is not None and result.stdout != expected_stdout:
+        raise AssertionError(f"unexpected stdout: {result.stdout!r}")
+    if expected_stderr is not None and result.stderr != expected_stderr:
+        raise AssertionError(f"unexpected stderr: {result.stderr!r}")
+
+
+def print_result(result: CommandResult) -> None:
+    print(f"\n[exit={result.exit_code} pid={result.pid}]")
 
 
 if __name__ == "__main__":
