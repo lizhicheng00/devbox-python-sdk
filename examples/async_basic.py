@@ -1,10 +1,12 @@
 import asyncio
+import os
 
 from devbox import AsyncSandbox
 
 
 async def main() -> None:
-    async with await AsyncSandbox.create(timeout=300) as sandbox:
+    template = os.getenv("DEVBOX_TEST_TEMPLATE", "default")
+    async with await AsyncSandbox.create(template, timeout=300) as sandbox:
         print(f"sandbox: {sandbox.sandbox_id}")
         result = await sandbox.commands.run("python --version")
         print(result.stdout or result.stderr)

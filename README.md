@@ -207,9 +207,9 @@ Command, filesystem, PTY, and Git operations require the Manager to return a rea
 envd domain and access token. Placeholder connection fields are accepted when only
 control-plane lifecycle operations are used.
 
-## Interactive Console
+## Runtime Validation
 
-Run `examples/interactive_console.py` from PyCharm for a zero-input runtime check.
+Run `examples/validate_runtime.py` from PyCharm for a zero-input runtime check.
 It creates a sandbox from `DEVBOX_TEST_TEMPLATE` (default: `default`), validates
 foreground and background commands, process listing, and filesystem operations,
 then deletes the test sandbox. Set `DEVBOX_SANDBOX_ID` only when an existing sandbox
