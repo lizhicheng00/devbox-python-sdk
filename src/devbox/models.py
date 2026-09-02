@@ -58,9 +58,9 @@ class SandboxInfo:
     sandbox_id: str
     template_id: str
     state: SandboxState
-    created_at: datetime
-    updated_at: datetime
-    timeout: int
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    timeout: int | None = None
     expires_at: datetime | None = None
     metadata: Mapping[str, str] = field(default_factory=dict)
     network: NetworkConfig = field(default_factory=NetworkConfig)
@@ -68,14 +68,20 @@ class SandboxInfo:
     @classmethod
     def from_wire(cls, value: Mapping[str, Any]) -> SandboxInfo:
         return cls(
-            sandbox_id=str(_pick(value, "sandboxId", "sandbox_id", "id")),
-            template_id=str(_pick(value, "templateId", "template_id", default="base")),
+            sandbox_id=str(_pick(value, "sandboxId", "sandboxID", "sandbox_id", "id")),
+            template_id=str(
+                _pick(value, "templateId", "templateID", "template_id", default="base")
+            ),
             state=SandboxState(str(_pick(value, "state", "status", default="running"))),
-            created_at=parse_datetime(_pick(value, "createdAt", "created_at")),
-            updated_at=parse_datetime(_pick(value, "updatedAt", "updated_at")),
-            timeout=_integer(_pick(value, "timeout", default=300)),
+            created_at=parse_optional_datetime(
+                _pick(value, "createdAt", "created_at", "startedAt", "started_at", default=None)
+            ),
+            updated_at=parse_optional_datetime(
+                _pick(value, "updatedAt", "updated_at", default=None)
+            ),
+            timeout=_optional_int(_pick(value, "timeout", default=None)),
             expires_at=parse_optional_datetime(
-                _pick(value, "expiresAt", "expires_at", default=None)
+                _pick(value, "expiresAt", "expires_at", "endAt", "end_at", default=None)
             ),
             metadata=_string_map(value.get("metadata")),
             network=_network(value.get("network")),
@@ -94,12 +100,30 @@ class SandboxConnection:
     def from_wire(cls, value: Mapping[str, Any], sandbox_id: str) -> SandboxConnection:
         return cls(
             sandbox_id=sandbox_id,
-            gateway_url=str(_pick(value, "gatewayUrl", "gateway_url", "envdUrl", "envd_url")),
-            access_token=str(_pick(value, "accessToken", "access_token", "token")),
+            gateway_url=_gateway_url(value),
+            access_token=str(
+                _pick(
+                    value,
+                    "accessToken",
+                    "access_token",
+                    "envdAccessToken",
+                    "envd_access_token",
+                    "token",
+                )
+            ),
             expires_at=parse_optional_datetime(
                 _pick(value, "expiresAt", "expires_at", default=None)
             ),
-            protocol_version=str(_pick(value, "protocolVersion", "protocol_version", default="v1")),
+            protocol_version=str(
+                _pick(
+                    value,
+                    "protocolVersion",
+                    "protocol_version",
+                    "envdVersion",
+                    "envd_version",
+                    default="v1",
+                )
+            ),
         )
 
 
@@ -318,6 +342,13 @@ def _optional_str(value: object) -> str | None:
 
 def _optional_int(value: object) -> int | None:
     return None if value is None else _integer(value)
+
+
+def _gateway_url(value: Mapping[str, Any]) -> str:
+    raw = str(_pick(value, "gatewayUrl", "gateway_url", "envdUrl", "envd_url", "domain"))
+    if not raw or raw == "None":
+        raise ValueError("sandbox response does not contain a gateway URL")
+    return raw if raw.startswith(("http://", "https://")) else f"https://{raw}"
 
 
 def _integer(value: object) -> int:

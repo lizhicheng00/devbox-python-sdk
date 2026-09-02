@@ -621,12 +621,15 @@ def _create_body(
     _validate_timeout(timeout)
     if not template.strip():
         raise ValueError("template must not be blank")
+    resolved_network = network or NetworkConfig()
     body: dict[str, object] = {
-        "template": template,
+        "templateID": template,
         "timeout": timeout,
-        "envs": dict(envs or {}),
+        "envVars": dict(envs or {}),
         "metadata": dict(metadata or {}),
-        "network": (network or NetworkConfig()).to_wire(),
+        "secure": True,
+        "allow_internet_access": resolved_network.allow_internet_access,
+        "network": {"allowPublicTraffic": resolved_network.allow_public_traffic},
     }
     if webhook_url:
         body["webhookUrl"] = webhook_url
@@ -638,7 +641,7 @@ def _sandbox_payload(value: object) -> tuple[SandboxInfo, SandboxConnection]:
     raw_sandbox = payload.get("sandbox", payload)
     sandbox = _mapping(raw_sandbox)
     info = SandboxInfo.from_wire(sandbox)
-    raw_connection = payload.get("connection", sandbox.get("connection"))
+    raw_connection = payload.get("connection", sandbox.get("connection", sandbox))
     if not isinstance(raw_connection, Mapping):
         raise ProtocolError("sandbox response does not contain connection details")
     return info, SandboxConnection.from_wire(raw_connection, info.sandbox_id)

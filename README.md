@@ -213,11 +213,12 @@ All exceptions inherit from `DevBoxError` and expose `code`, `status_code`,
 
 | Setting | Environment variable | Default |
 | --- | --- | --- |
-| API key | `DEVBOX_API_KEY` | required |
-| Control-plane URL | `DEVBOX_API_URL` | `https://devbox.developer.myhuaweicloud.com` |
+| API key | `DEVBOX_API_KEY` or `E2B_API_KEY` | required |
+| Control-plane URL | `DEVBOX_API_URL` or `E2B_API_URL` | `https://devbox.developer.myhuaweicloud.com` |
 | Request timeout | constructor argument | 30 seconds |
 
-Constructor arguments take precedence over environment variables.
+Constructor arguments take precedence over `DEVBOX_*`, followed by E2B-compatible
+environment variables.
 
 The API key is sent only to the control plane as `X-API-Key`. Create and connect
 responses provide a short-lived sandbox connection token; only that token is sent

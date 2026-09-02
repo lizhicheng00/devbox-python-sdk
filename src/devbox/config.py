@@ -27,10 +27,16 @@ class ConnectionConfig:
         request_timeout: float = 30.0,
         headers: Mapping[str, str] | None = None,
     ) -> ConnectionConfig:
-        resolved_key = (api_key or os.getenv("DEVBOX_API_KEY") or "").strip()
+        resolved_key = (
+            api_key or os.getenv("DEVBOX_API_KEY") or os.getenv("E2B_API_KEY") or ""
+        ).strip()
         if not resolved_key:
-            raise ConfigurationError("api_key is required; set DEVBOX_API_KEY or pass api_key")
-        resolved_url = (api_url or os.getenv("DEVBOX_API_URL") or DEFAULT_API_URL).rstrip("/")
+            raise ConfigurationError(
+                "api_key is required; set DEVBOX_API_KEY, E2B_API_KEY, or pass api_key"
+            )
+        resolved_url = (
+            api_url or os.getenv("DEVBOX_API_URL") or os.getenv("E2B_API_URL") or DEFAULT_API_URL
+        ).rstrip("/")
         if not resolved_url.startswith(("https://", "http://")):
             raise ConfigurationError("api_url must start with http:// or https://")
         if request_timeout <= 0:

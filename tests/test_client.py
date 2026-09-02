@@ -40,7 +40,8 @@ def test_create_sandbox_sends_auth_and_returns_connected_sandbox() -> None:
     assert request.url.path == "/sandboxes"
     assert request.headers["X-API-Key"] == "devbox_secret"
     assert request.headers["Idempotency-Key"]
-    assert body["template"] == "python"
+    assert body["templateID"] == "python"
+    assert body["envVars"] == {"A": "1"}
     assert body["network"]["allowPublicTraffic"] is True
     assert sandbox.sandbox_id == "sbx_123"
     assert sandbox.info.state is SandboxState.RUNNING
@@ -63,6 +64,31 @@ def test_list_sandboxes_supports_pagination() -> None:
 
     assert page.next_token == "next-page"
     assert page.items[0].sandbox_id == "sbx_123"
+
+
+def test_create_accepts_e2b_flat_response() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            201,
+            json={
+                "sandboxID": "sbx_e2b",
+                "templateID": "base",
+                "envdAccessToken": "envd-token",
+                "envdVersion": "1.0.0",
+                "domain": "gateway.example.test",
+            },
+        )
+
+    with DevBox(
+        api_key="devbox_secret",
+        api_url="https://api.example.test",
+        http_transport=httpx.MockTransport(handler),
+    ) as client:
+        sandbox = client.sandboxes.create()
+
+    assert sandbox.sandbox_id == "sbx_e2b"
+    assert sandbox.info.template_id == "base"
+    assert sandbox.info.created_at is None
 
 
 def test_refresh_and_snapshot_listing_use_lifecycle_endpoints() -> None:
