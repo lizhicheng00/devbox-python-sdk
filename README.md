@@ -207,6 +207,13 @@ Command, filesystem, PTY, and Git operations require the Manager to return a rea
 envd domain and access token. Placeholder connection fields are accepted when only
 control-plane lifecycle operations are used.
 
+## Interactive Console
+
+Run `examples/interactive_console.py` from PyCharm to enter Linux commands one at a
+time. Enter an existing sandbox ID, or leave it empty and enter a template ID to
+create a temporary sandbox. Use `:help` to list lifecycle commands. A sandbox created
+by the console is deleted on exit unless `:detach` is used.
+
 ## Errors
 
 HTTP failures are mapped to typed exceptions:
