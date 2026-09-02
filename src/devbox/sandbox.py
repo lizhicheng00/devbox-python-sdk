@@ -692,7 +692,6 @@ def _create_body(
         "templateID": template,
         "timeout": _checked_timeout(timeout),
         "autoPause": auto_pause,
-        "autoPauseMemory": auto_pause_memory,
         "autoResume": {"enabled": auto_resume},
         "secure": secure,
         "allow_internet_access": resolved_network.allow_internet_access,
@@ -701,6 +700,8 @@ def _create_body(
         "envVars": dict(envs or {}),
         "volumeMounts": [item.to_wire() for item in volume_mounts],
     }
+    if auto_pause:
+        body["autoPauseMemory"] = auto_pause_memory
     if client_id:
         body["clientID"] = client_id
     if build_id:

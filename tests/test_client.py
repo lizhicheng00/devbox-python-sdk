@@ -30,6 +30,7 @@ def test_create_uses_manager_contract() -> None:
     assert body["templateID"] == "python"
     assert body["envVars"] == {"A": "1"}
     assert body["autoResume"] == {"enabled": False}
+    assert "autoPauseMemory" not in body
     assert body["network"]["allowPublicTraffic"] is True
     assert sandbox.sandbox_id == "sbx_123"
 
