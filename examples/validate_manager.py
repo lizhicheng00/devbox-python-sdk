@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import argparse
 import os
 from collections.abc import Callable
 from typing import TypeVar
+
+import httpx
 
 from devbox import DevBox, DevBoxError, NetworkConfig
 
@@ -10,6 +13,14 @@ T = TypeVar("T")
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Validate the DevBox Manager API")
+    parser.add_argument(
+        "-k",
+        "--insecure",
+        action="store_true",
+        help="allow an HTTPS server with an untrusted development certificate",
+    )
+    args = parser.parse_args()
     failures: list[str] = []
 
     def verify(name: str, operation: Callable[[], T]) -> T | None:
@@ -27,7 +38,8 @@ def main() -> None:
         failures.append("configuration.template")
         print("FAIL configuration.template: DEVBOX_TEST_TEMPLATE is required")
 
-    with DevBox() as client:
+    http_transport = httpx.HTTPTransport(verify=not args.insecure)
+    with DevBox(http_transport=http_transport) as client:
         sandboxes = verify("sandboxes.list", lambda: client.sandboxes.list(limit=20))
         if sandboxes:
             print(f"  sandboxes={len(sandboxes.items)} total_running={sandboxes.total}")
