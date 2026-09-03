@@ -4,7 +4,7 @@ import os
 from collections.abc import Callable
 from typing import TypeVar
 
-from devbox import CommandResult, DevBox, DevBoxError, NetworkConfig
+from devbox import DevBox, DevBoxError, NetworkConfig
 
 T = TypeVar("T")
 
@@ -28,22 +28,9 @@ def main() -> None:
         print("FAIL configuration.template: DEVBOX_TEST_TEMPLATE is required")
 
     with DevBox() as client:
-        health = verify("health", client.health)
         sandboxes = verify("sandboxes.list", lambda: client.sandboxes.list(limit=20))
-        snapshots = verify("snapshots.list", lambda: client.snapshots.list(limit=20))
-        templates = verify("templates.list", client.templates.list)
-        nodes = verify("nodes.list", client.nodes.list)
-
-        if health:
-            print(f"  status={health.status}")
         if sandboxes:
             print(f"  sandboxes={len(sandboxes.items)} total_running={sandboxes.total}")
-        if snapshots:
-            print(f"  snapshots={len(snapshots.items)}")
-        if templates is not None:
-            print(f"  templates={len(templates)}")
-        if nodes is not None:
-            print(f"  nodes={len(nodes)}")
 
         if template_id:
             validate_sandbox(client, template_id, verify, failures)
@@ -89,17 +76,6 @@ def validate_sandbox(
         )
         verify("sandboxes.pause", sandbox.pause)
         verify("sandboxes.connect", lambda: sandbox.resume(timeout=300))
-        result = verify(
-            "commands.run",
-            lambda: sandbox.commands.run("printf devbox-sdk-ready", check=False),
-        )
-        if result is not None and (
-            not isinstance(result, CommandResult) or result.stdout != "devbox-sdk-ready"
-        ):
-            failures.append("commands.output")
-            print("FAIL commands.output: unexpected command result")
-        elif result is not None:
-            print("PASS commands.output")
     finally:
         verify("sandboxes.delete", sandbox.kill)
         sandbox.close()

@@ -1,49 +1,96 @@
 from __future__ import annotations
 
-import base64
-from collections.abc import Mapping
+import json
 from typing import Any
 
+import httpx
 import pytest
 
+from devbox._transport import SyncTransport
 from devbox.filesystem import Filesystem
+from devbox.models import FileType
 
 
-class FilesystemTransport:
-    def __init__(self) -> None:
-        self.body: Mapping[str, Any] = {}
+def test_files_use_rest_content_and_connect_metadata() -> None:
+    requests: list[httpx.Request] = []
 
-    def request(self, method: str, path: str, *, json_body: object | None = None) -> object:
-        assert isinstance(json_body, Mapping)
-        self.body = json_body
-        return {
-            "name": "data.bin",
-            "path": "/tmp/data.bin",
-            "type": "file",
-            "size": 3,
-        }
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "POST" and request.url.path == "/files":
+            assert request.url.params["path"] == "/tmp/data.bin"
+            assert request.headers["Content-Type"] == "application/octet-stream"
+            assert request.content == b"\x00\x01\x02"
+            return httpx.Response(
+                200,
+                json=[{"name": "data.bin", "path": "/tmp/data.bin", "type": "file", "size": 3}],
+            )
+        if request.method == "GET":
+            return httpx.Response(200, content=b"\x00\x01\x02")
+        body = json.loads(request.content)
+        assert request.url.path == "/filesystem.Filesystem/Stat"
+        assert body == {"path": "/tmp/data.bin"}
+        return httpx.Response(
+            200,
+            json={
+                "entry": {
+                    "name": "data.bin",
+                    "path": "/tmp/data.bin",
+                    "type": "FILE_TYPE_FILE",
+                    "size": "3",
+                    "mode": 420,
+                }
+            },
+            headers={"Content-Type": "application/json"},
+        )
 
-    def request_bytes(
-        self, method: str, path: str, *, params: Mapping[str, object] | None = None
-    ) -> bytes:
-        assert params == {"path": "/tmp/data.bin"}
-        return b"\x00\x01\x02"
+    with _transport(handler) as transport:
+        files = Filesystem(lambda: transport)
+        written = files.write("/tmp/data.bin", b"\x00\x01\x02")
+        content = files.read_bytes("/tmp/data.bin")
+        info = files.stat("/tmp/data.bin")
+
+    assert written.size == 3
+    assert content == b"\x00\x01\x02"
+    assert info.type is FileType.FILE
+    assert info.mode == 0o644
+    assert requests[2].headers["Connect-Protocol-Version"] == "1"
 
 
-def test_files_are_transferred_as_binary() -> None:
-    transport = FilesystemTransport()
-    files = Filesystem(lambda: transport)  # type: ignore[arg-type]
+def test_list_uses_envd_rpc_shape() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/filesystem.Filesystem/ListDir"
+        assert json.loads(request.content) == {"path": "/tmp", "depth": 1}
+        return httpx.Response(
+            200,
+            json={
+                "entries": [
+                    {
+                        "name": "cache",
+                        "path": "/tmp/cache",
+                        "type": "FILE_TYPE_DIRECTORY",
+                    }
+                ]
+            },
+            headers={"Content-Type": "application/json"},
+        )
 
-    info = files.write("/tmp/data.bin", b"\x00\x01\x02")
+    with _transport(handler) as transport:
+        entries = Filesystem(lambda: transport).list("/tmp")
 
-    assert info.size == 3
-    assert base64.b64decode(str(transport.body["content"])) == b"\x00\x01\x02"
-    assert files.read_bytes("/tmp/data.bin") == b"\x00\x01\x02"
+    assert entries[0].type is FileType.DIRECTORY
 
 
 def test_sandbox_path_must_be_absolute() -> None:
-    transport = FilesystemTransport()
-    files = Filesystem(lambda: transport)  # type: ignore[arg-type]
+    with _transport(lambda request: httpx.Response(500)) as transport:
+        files = Filesystem(lambda: transport)
+        with pytest.raises(ValueError, match="absolute"):
+            files.read("relative.txt")
 
-    with pytest.raises(ValueError, match="absolute"):
-        files.read("relative.txt")
+
+def _transport(handler: Any) -> SyncTransport:
+    return SyncTransport(
+        "https://envd.test",
+        headers={},
+        timeout=30,
+        transport=httpx.MockTransport(handler),
+    )

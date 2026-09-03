@@ -1,23 +1,37 @@
 from __future__ import annotations
 
+import base64
+import codecs
 import inspect
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from typing import Any
 
 from ._transport import AsyncTransport, SyncTransport
 from .errors import CommandExitError, ProtocolError
-from .models import CommandResult, OutputChunk, ProcessInfo, PtySize, parse_optional_datetime
+from .models import CommandResult, OutputChunk, ProcessInfo, PtySize
 
 OutputHandler = Callable[[str], None]
 AsyncOutputHandler = Callable[[str], Awaitable[None] | None]
 SyncTransportProvider = Callable[[], SyncTransport]
 AsyncTransportProvider = Callable[[], Awaitable[AsyncTransport]]
 
+_PROCESS = "/process.Process"
+
 
 class CommandHandle:
-    def __init__(self, pid: int, commands: Commands) -> None:
+    def __init__(
+        self,
+        pid: int,
+        commands: Commands,
+        events: Iterator[Mapping[str, Any]] | None = None,
+        *,
+        input_stream: str = "stdin",
+    ) -> None:
         self.pid = pid
         self._commands = commands
+        self._events = events
+        self._input_stream = input_stream
+        self._result: CommandResult | None = None
 
     def wait(
         self,
@@ -27,16 +41,16 @@ class CommandHandle:
         on_stderr: OutputHandler | None = None,
         check: bool = True,
     ) -> CommandResult:
-        return self._commands._collect(
-            "/envd/process/connect",
-            {"pid": self.pid, "timeout": timeout},
-            on_stdout,
-            on_stderr,
-            check,
-        )
+        if self._result is None:
+            events = self._events or self._commands._connect_events(self.pid, timeout)
+            self._events = None
+            self._result = self._commands._collect_events(events, self.pid, on_stdout, on_stderr)
+        if check and self._result.exit_code != 0:
+            raise CommandExitError(self._result)
+        return self._result
 
     def send_stdin(self, data: str | bytes) -> None:
-        self._commands.send_stdin(self.pid, data)
+        self._commands._send_input(self.pid, data, self._input_stream)
 
     def close_stdin(self) -> None:
         self._commands.close_stdin(self.pid)
@@ -46,6 +60,12 @@ class CommandHandle:
 
     def kill(self) -> None:
         self.send_signal("SIGKILL")
+
+    def disconnect(self) -> None:
+        close = getattr(self._events, "close", None)
+        if close:
+            close()
+        self._events = None
 
 
 class Commands:
@@ -66,72 +86,103 @@ class Commands:
         on_stderr: OutputHandler | None = None,
         check: bool = True,
     ) -> CommandResult | CommandHandle:
-        body = _command_body(command, envs, cwd, user, stdin, timeout)
+        handle = self._start(_command_body(command, envs, cwd, stdin), timeout=timeout, user=user)
         if background:
-            return self._start_background(body)
-        return self._collect("/envd/process/start", body, on_stdout, on_stderr, check)
+            return handle
+        return handle.wait(on_stdout=on_stdout, on_stderr=on_stderr, check=check)
 
     def connect(self, pid: int) -> CommandHandle:
         _validate_pid(pid)
         return CommandHandle(pid, self)
 
     def list(self) -> tuple[ProcessInfo, ...]:
-        payload = self._transport().request("POST", "/envd/process/list", json_body={})
-        values = _list_payload(payload, "processes")
-        return tuple(ProcessInfo.from_wire(item) for item in values)
+        payload = self._transport().connect_unary(f"{_PROCESS}/List", {})
+        return tuple(ProcessInfo.from_wire(item) for item in _items(payload, "processes"))
 
     def send_stdin(self, pid: int, data: str | bytes) -> None:
-        _validate_pid(pid)
-        self._transport().request(
-            "POST",
-            "/envd/process/send-input",
-            json_body={"pid": pid, "data": _input(data)},
-        )
+        self._send_input(pid, data, "stdin")
 
     def close_stdin(self, pid: int) -> None:
         _validate_pid(pid)
-        self._transport().request("POST", "/envd/process/close-stdin", json_body={"pid": pid})
+        self._transport().connect_unary(f"{_PROCESS}/CloseStdin", {"process": {"pid": pid}})
 
     def send_signal(self, pid: int, signal: str) -> None:
         _validate_pid(pid)
-        self._transport().request(
-            "POST",
-            "/envd/process/send-signal",
-            json_body={"pid": pid, "signal": signal},
+        self._transport().connect_unary(
+            f"{_PROCESS}/SendSignal",
+            {"process": {"pid": pid}, "signal": _signal(signal)},
         )
 
-    def _start_background(
-        self, body: Mapping[str, object], pty: PtySize | None = None
+    def _start(
+        self,
+        body: Mapping[str, object],
+        *,
+        timeout: float | None,
+        user: str | None = None,
+        pty: PtySize | None = None,
+        input_stream: str = "stdin",
     ) -> CommandHandle:
         request = dict(body)
-        request["background"] = True
         if pty:
-            request["pty"] = {"rows": pty.rows, "cols": pty.cols}
-        payload = self._transport().request("POST", "/envd/process/start", json_body=request)
-        pid = _pid(payload)
-        return CommandHandle(pid, self)
+            request["pty"] = {"size": {"rows": pty.rows, "cols": pty.cols}}
+        events = self._transport().connect_stream(
+            f"{_PROCESS}/Start",
+            request,
+            timeout=timeout,
+            headers=_process_headers(user),
+        )
+        pid = _first_pid(events, "start process")
+        return CommandHandle(pid, self, events, input_stream=input_stream)
 
-    def _collect(
-        self,
-        path: str,
-        body: Mapping[str, object],
+    def _connect_events(self, pid: int, timeout: float | None) -> Iterator[Mapping[str, Any]]:
+        events = self._transport().connect_stream(
+            f"{_PROCESS}/Connect",
+            {"process": {"pid": pid}},
+            timeout=timeout,
+            headers={"Keepalive-Ping-Interval": "50"},
+        )
+        connected_pid = _first_pid(events, "connect to process")
+        if connected_pid != pid:
+            raise ProtocolError("EnvD connected to an unexpected process")
+        return events
+
+    def _send_input(self, pid: int, data: str | bytes, stream: str) -> None:
+        _validate_pid(pid)
+        self._transport().connect_unary(
+            f"{_PROCESS}/SendInput",
+            {
+                "process": {"pid": pid},
+                "input": {stream: base64.b64encode(_bytes(data)).decode("ascii")},
+            },
+        )
+
+    @staticmethod
+    def _collect_events(
+        events: Iterator[Mapping[str, Any]],
+        pid: int,
         on_stdout: OutputHandler | None,
         on_stderr: OutputHandler | None,
-        check: bool,
     ) -> CommandResult:
-        collector = _OutputCollector(on_stdout, on_stderr)
-        for event in self._transport().iter_events("POST", path, json_body=body):
+        collector = _OutputCollector(pid, on_stdout, on_stderr)
+        for event in events:
             collector.add(event)
-        result = collector.result()
-        if check and result.exit_code != 0:
-            raise CommandExitError(result)
-        return result
+        return collector.result()
 
 
 class AsyncCommandHandle:
-    def __init__(self, pid: int, commands: AsyncCommands) -> None:
+    def __init__(
+        self,
+        pid: int,
+        commands: AsyncCommands,
+        events: AsyncIterator[Mapping[str, Any]] | None = None,
+        *,
+        input_stream: str = "stdin",
+    ) -> None:
         self.pid = pid
         self._commands = commands
+        self._events = events
+        self._input_stream = input_stream
+        self._result: CommandResult | None = None
 
     async def wait(
         self,
@@ -141,16 +192,18 @@ class AsyncCommandHandle:
         on_stderr: AsyncOutputHandler | None = None,
         check: bool = True,
     ) -> CommandResult:
-        return await self._commands._collect(
-            "/envd/process/connect",
-            {"pid": self.pid, "timeout": timeout},
-            on_stdout,
-            on_stderr,
-            check,
-        )
+        if self._result is None:
+            events = self._events or await self._commands._connect_events(self.pid, timeout)
+            self._events = None
+            self._result = await self._commands._collect_events(
+                events, self.pid, on_stdout, on_stderr
+            )
+        if check and self._result.exit_code != 0:
+            raise CommandExitError(self._result)
+        return self._result
 
     async def send_stdin(self, data: str | bytes) -> None:
-        await self._commands.send_stdin(self.pid, data)
+        await self._commands._send_input(self.pid, data, self._input_stream)
 
     async def close_stdin(self) -> None:
         await self._commands.close_stdin(self.pid)
@@ -160,6 +213,12 @@ class AsyncCommandHandle:
 
     async def kill(self) -> None:
         await self.send_signal("SIGKILL")
+
+    async def disconnect(self) -> None:
+        close = getattr(self._events, "aclose", None)
+        if close:
+            await close()
+        self._events = None
 
 
 class AsyncCommands:
@@ -180,10 +239,12 @@ class AsyncCommands:
         on_stderr: AsyncOutputHandler | None = None,
         check: bool = True,
     ) -> CommandResult | AsyncCommandHandle:
-        body = _command_body(command, envs, cwd, user, stdin, timeout)
+        handle = await self._start(
+            _command_body(command, envs, cwd, stdin), timeout=timeout, user=user
+        )
         if background:
-            return await self._start_background(body)
-        return await self._collect("/envd/process/start", body, on_stdout, on_stderr, check)
+            return handle
+        return await handle.wait(on_stdout=on_stdout, on_stderr=on_stderr, check=check)
 
     def connect(self, pid: int) -> AsyncCommandHandle:
         _validate_pid(pid)
@@ -191,100 +252,126 @@ class AsyncCommands:
 
     async def list(self) -> tuple[ProcessInfo, ...]:
         transport = await self._transport()
-        payload = await transport.request("POST", "/envd/process/list", json_body={})
-        values = _list_payload(payload, "processes")
-        return tuple(ProcessInfo.from_wire(item) for item in values)
+        payload = await transport.connect_unary(f"{_PROCESS}/List", {})
+        return tuple(ProcessInfo.from_wire(item) for item in _items(payload, "processes"))
 
     async def send_stdin(self, pid: int, data: str | bytes) -> None:
-        _validate_pid(pid)
-        transport = await self._transport()
-        await transport.request(
-            "POST",
-            "/envd/process/send-input",
-            json_body={"pid": pid, "data": _input(data)},
-        )
+        await self._send_input(pid, data, "stdin")
 
     async def close_stdin(self, pid: int) -> None:
         _validate_pid(pid)
         transport = await self._transport()
-        await transport.request("POST", "/envd/process/close-stdin", json_body={"pid": pid})
+        await transport.connect_unary(f"{_PROCESS}/CloseStdin", {"process": {"pid": pid}})
 
     async def send_signal(self, pid: int, signal: str) -> None:
         _validate_pid(pid)
         transport = await self._transport()
-        await transport.request(
-            "POST",
-            "/envd/process/send-signal",
-            json_body={"pid": pid, "signal": signal},
+        await transport.connect_unary(
+            f"{_PROCESS}/SendSignal",
+            {"process": {"pid": pid}, "signal": _signal(signal)},
         )
 
-    async def _start_background(
-        self, body: Mapping[str, object], pty: PtySize | None = None
+    async def _start(
+        self,
+        body: Mapping[str, object],
+        *,
+        timeout: float | None,
+        user: str | None = None,
+        pty: PtySize | None = None,
+        input_stream: str = "stdin",
     ) -> AsyncCommandHandle:
         request = dict(body)
-        request["background"] = True
         if pty:
-            request["pty"] = {"rows": pty.rows, "cols": pty.cols}
+            request["pty"] = {"size": {"rows": pty.rows, "cols": pty.cols}}
         transport = await self._transport()
-        payload = await transport.request("POST", "/envd/process/start", json_body=request)
-        return AsyncCommandHandle(_pid(payload), self)
+        events = transport.connect_stream(
+            f"{_PROCESS}/Start",
+            request,
+            timeout=timeout,
+            headers=_process_headers(user),
+        )
+        pid = await _first_pid_async(events, "start process")
+        return AsyncCommandHandle(pid, self, events, input_stream=input_stream)
 
-    async def _collect(
-        self,
-        path: str,
-        body: Mapping[str, object],
+    async def _connect_events(
+        self, pid: int, timeout: float | None
+    ) -> AsyncIterator[Mapping[str, Any]]:
+        transport = await self._transport()
+        events = transport.connect_stream(
+            f"{_PROCESS}/Connect",
+            {"process": {"pid": pid}},
+            timeout=timeout,
+            headers={"Keepalive-Ping-Interval": "50"},
+        )
+        connected_pid = await _first_pid_async(events, "connect to process")
+        if connected_pid != pid:
+            raise ProtocolError("EnvD connected to an unexpected process")
+        return events
+
+    async def _send_input(self, pid: int, data: str | bytes, stream: str) -> None:
+        _validate_pid(pid)
+        transport = await self._transport()
+        await transport.connect_unary(
+            f"{_PROCESS}/SendInput",
+            {
+                "process": {"pid": pid},
+                "input": {stream: base64.b64encode(_bytes(data)).decode("ascii")},
+            },
+        )
+
+    @staticmethod
+    async def _collect_events(
+        events: AsyncIterator[Mapping[str, Any]],
+        pid: int,
         on_stdout: AsyncOutputHandler | None,
         on_stderr: AsyncOutputHandler | None,
-        check: bool,
     ) -> CommandResult:
-        collector = _OutputCollector()
-        transport = await self._transport()
-        async for event in transport.iter_events("POST", path, json_body=body):
+        collector = _OutputCollector(pid)
+        async for event in events:
             chunk = collector.add(event)
             if chunk and chunk.stream == "stdout" and on_stdout:
                 await _invoke(on_stdout, chunk.data)
             if chunk and chunk.stream == "stderr" and on_stderr:
                 await _invoke(on_stderr, chunk.data)
-        result = collector.result()
-        if check and result.exit_code != 0:
-            raise CommandExitError(result)
-        return result
+        return collector.result()
 
 
 class _OutputCollector:
     def __init__(
         self,
+        pid: int,
         on_stdout: OutputHandler | None = None,
         on_stderr: OutputHandler | None = None,
     ) -> None:
+        self._pid = pid
         self._stdout: list[str] = []
         self._stderr: list[str] = []
         self._exit_code: int | None = None
-        self._pid: int | None = None
+        self._stdout_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        self._stderr_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         self._on_stdout = on_stdout
         self._on_stderr = on_stderr
 
-    def add(self, event: Mapping[str, Any]) -> OutputChunk | None:
-        event_type = str(event.get("type", event.get("stream", ""))).lower()
-        if "pid" in event:
-            self._pid = int(event["pid"])
-        if "exitCode" in event or "exit_code" in event:
-            self._exit_code = int(event.get("exitCode", event.get("exit_code", 0)))
-        if "stdout" in event and event_type not in {"stdout", "stderr"}:
-            self._append("stdout", str(event["stdout"]))
-        if "stderr" in event and event_type not in {"stdout", "stderr"}:
-            self._append("stderr", str(event["stderr"]))
-        if event_type not in {"stdout", "stderr"}:
+    def add(self, response: Mapping[str, Any]) -> OutputChunk | None:
+        event = response.get("event")
+        if not isinstance(event, Mapping):
             return None
-        data = str(event.get("data", event.get(event_type, "")))
-        self._append(event_type, data)
-        return OutputChunk(
-            stream=event_type,
-            data=data,
-            timestamp=parse_optional_datetime(event.get("timestamp")),
-        )
+        data = event.get("data")
+        if isinstance(data, Mapping):
+            for stream in ("stdout", "stderr", "pty"):
+                if stream in data:
+                    target = "stdout" if stream == "pty" else stream
+                    value = self._decode(target, data[stream])
+                    if value:
+                        self._append(target, value)
+                        return OutputChunk(stream=target, data=value)
+        end = event.get("end")
+        if isinstance(end, Mapping):
+            self._exit_code = int(end.get("exitCode", end.get("exit_code", 0)))
+        return None
 
     def result(self) -> CommandResult:
+        self._flush()
         if self._exit_code is None:
             raise ProtocolError("command stream ended without an exit status")
         return CommandResult(
@@ -293,6 +380,22 @@ class _OutputCollector:
             stderr="".join(self._stderr),
             pid=self._pid,
         )
+
+    def _decode(self, stream: str, value: object) -> str:
+        try:
+            data = base64.b64decode(str(value), validate=True)
+        except ValueError as error:
+            raise ProtocolError("EnvD returned invalid process output") from error
+        decoder = self._stdout_decoder if stream == "stdout" else self._stderr_decoder
+        return decoder.decode(data)
+
+    def _flush(self) -> None:
+        stdout = self._stdout_decoder.decode(b"", final=True)
+        stderr = self._stderr_decoder.decode(b"", final=True)
+        if stdout:
+            self._append("stdout", stdout)
+        if stderr:
+            self._append("stderr", stderr)
 
     def _append(self, stream: str, data: str) -> None:
         if stream == "stdout":
@@ -309,54 +412,77 @@ def _command_body(
     command: str,
     envs: Mapping[str, str] | None,
     cwd: str | None,
-    user: str | None,
     stdin: bool,
-    timeout: float | None,
 ) -> dict[str, object]:
     if not command.strip():
         raise ValueError("command must not be blank")
-    if timeout is not None and timeout < 0:
-        raise ValueError("timeout must be non-negative or None")
-    body: dict[str, object] = {
-        "command": command,
+    process: dict[str, object] = {
+        "cmd": "/bin/bash",
+        "args": ["-l", "-c", command],
         "envs": dict(envs or {}),
-        "stdin": stdin,
-        "timeout": timeout,
     }
     if cwd:
-        body["cwd"] = cwd
+        process["cwd"] = cwd
+    return {"process": process, "stdin": stdin}
+
+
+def _process_headers(user: str | None) -> dict[str, str]:
+    headers = {"Keepalive-Ping-Interval": "50"}
     if user:
-        body["user"] = user
-    return body
+        token = base64.b64encode(f"{user}:".encode()).decode("ascii")
+        headers["Authorization"] = f"Basic {token}"
+    return headers
 
 
-def _pid(payload: object) -> int:
-    if not isinstance(payload, Mapping) or "pid" not in payload:
-        raise ProtocolError("process response does not contain pid")
-    pid = int(payload["pid"])
+def _first_pid(events: Iterator[Mapping[str, Any]], action: str) -> int:
+    try:
+        response = next(events)
+    except StopIteration as error:
+        raise ProtocolError(f"EnvD did not {action}") from error
+    return _start_pid(response, action)
+
+
+async def _first_pid_async(events: AsyncIterator[Mapping[str, Any]], action: str) -> int:
+    try:
+        response = await anext(events)
+    except StopAsyncIteration as error:
+        raise ProtocolError(f"EnvD did not {action}") from error
+    return _start_pid(response, action)
+
+
+def _start_pid(response: Mapping[str, Any], action: str) -> int:
+    event = response.get("event")
+    start = event.get("start") if isinstance(event, Mapping) else None
+    if not isinstance(start, Mapping) or "pid" not in start:
+        raise ProtocolError(f"EnvD did not {action}")
+    pid = int(start["pid"])
     _validate_pid(pid)
     return pid
+
+
+def _items(payload: object, key: str) -> tuple[Mapping[str, Any], ...]:
+    source = payload.get(key, []) if isinstance(payload, Mapping) else []
+    if not isinstance(source, list):
+        raise ProtocolError("process response is invalid")
+    return tuple(item for item in source if isinstance(item, Mapping))
+
+
+def _signal(value: str) -> str:
+    normalized = value.upper()
+    if normalized.startswith("SIGNAL_"):
+        return normalized
+    if normalized in {"SIGTERM", "SIGKILL"}:
+        return f"SIGNAL_{normalized}"
+    raise ValueError("signal must be SIGTERM or SIGKILL")
+
+
+def _bytes(value: str | bytes) -> bytes:
+    return value.encode() if isinstance(value, str) else value
 
 
 def _validate_pid(pid: int) -> None:
     if pid < 1:
         raise ValueError("pid must be positive")
-
-
-def _input(data: str | bytes) -> str:
-    return data.decode() if isinstance(data, bytes) else data
-
-
-def _list_payload(payload: object, key: str) -> tuple[Mapping[str, Any], ...]:
-    if isinstance(payload, list):
-        source = payload
-    elif isinstance(payload, Mapping):
-        source = payload.get(key, payload.get("items", []))
-    else:
-        source = []
-    if not isinstance(source, list):
-        raise ProtocolError("process response is invalid")
-    return tuple(item for item in source if isinstance(item, Mapping))
 
 
 async def _invoke(handler: AsyncOutputHandler, value: str) -> None:

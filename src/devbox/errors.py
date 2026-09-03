@@ -144,6 +144,25 @@ def raise_for_response(response: httpx.Response) -> NoReturn:
     )
 
 
+def raise_connect_error(error: Mapping[str, Any]) -> NoReturn:
+    code = str(error.get("code", "unknown"))
+    message = str(error.get("message") or "EnvD request failed")
+    status_code, exception_type = {
+        "invalid_argument": (400, ValidationError),
+        "out_of_range": (400, ValidationError),
+        "unauthenticated": (401, AuthenticationError),
+        "permission_denied": (403, PermissionDeniedError),
+        "not_found": (404, NotFoundError),
+        "already_exists": (409, ConflictError),
+        "aborted": (409, ConflictError),
+        "resource_exhausted": (429, RateLimitError),
+        "deadline_exceeded": (408, RequestTimeoutError),
+        "unavailable": (503, ServiceUnavailableError),
+        "internal": (500, ServiceUnavailableError),
+    }.get(code, (None, DevBoxError))
+    raise exception_type(message, code=code, status_code=status_code)
+
+
 def _details(value: object) -> tuple[ErrorDetail, ...]:
     if not isinstance(value, list):
         return ()

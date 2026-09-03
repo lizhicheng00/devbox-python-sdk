@@ -2,14 +2,14 @@
 
 Python client for creating and operating isolated DevBox sandboxes.
 
-The SDK keeps the public API small while covering the first-phase workflow:
+The SDK keeps the public API small while covering sandbox lifecycle and runtime work:
 
 - create, connect, inspect, pause, resume, fork, snapshot, and delete sandboxes;
 - run foreground or background commands and reconnect to running processes;
 - read, write, upload, download, inspect, and watch files;
 - open interactive PTY sessions;
 - run common Git workflows without putting credentials in command arguments;
-- manage templates, builds, snapshots, and compute nodes;
+- call template, build, snapshot, and compute-node resources when exposed by the Manager;
 - use the same capabilities from synchronous or asynchronous applications.
 
 ## Install
@@ -193,19 +193,19 @@ with DevBox() as client:
 
 ## Manager Validation
 
-Run the same smoke validation used by the PyCharm `DevBox Basic` configuration:
+Run the control-plane smoke validation used by the PyCharm `DevBox Manager` configuration:
 
 ```bash
 python examples/validate_manager.py
 ```
 
-Set `DEVBOX_TEST_TEMPLATE` to a deployed template ID. The validator is strict:
-missing Manager endpoints, missing configuration, lifecycle failures, unavailable
-envd command routing, or unexpected command output produce a non-zero exit code.
+Set `DEVBOX_TEST_TEMPLATE` to a deployed template ID. The validator covers only the
+phase-one `/sandboxes` surface. Configuration or lifecycle failures produce a non-zero
+exit code; Manager resources that are not published in this deployment are not probed.
 
-Command, filesystem, PTY, and Git operations require the Manager to return a real
-envd domain and access token. Placeholder connection fields are accepted when only
-control-plane lifecycle operations are used.
+Command, filesystem, PTY, and Git operations use EnvD's ConnectRPC and `/files`
+protocols. They require the Manager to return a real EnvD domain and access token;
+the current placeholder fields support control-plane lifecycle operations only.
 
 ## Runtime Validation
 

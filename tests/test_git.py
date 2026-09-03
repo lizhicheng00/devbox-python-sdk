@@ -12,12 +12,19 @@ class GitTransport:
     def __init__(self) -> None:
         self.body: Mapping[str, Any] = {}
 
-    def iter_events(
-        self, method: str, path: str, *, json_body: object | None = None
+    def connect_stream(
+        self,
+        path: str,
+        json_body: object,
+        *,
+        timeout: float | None = None,
+        headers: Mapping[str, str] | None = None,
     ) -> Iterator[Mapping[str, Any]]:
+        del path, timeout, headers
         assert isinstance(json_body, Mapping)
         self.body = json_body
-        yield {"type": "exit", "exitCode": 0}
+        yield {"event": {"start": {"pid": 42}}}
+        yield {"event": {"end": {"exited": True}}}
 
 
 def test_git_credentials_are_not_embedded_in_command() -> None:
@@ -30,8 +37,10 @@ def test_git_credentials_are_not_embedded_in_command() -> None:
         credentials=GitCredentials("alice", "secret-token"),
     )
 
-    command = str(transport.body["command"])
-    envs = transport.body["envs"]
+    process = transport.body["process"]
+    assert isinstance(process, Mapping)
+    command = str(process["args"])
+    envs = process["envs"]
     assert "secret-token" not in command
     assert isinstance(envs, Mapping)
     assert envs["DEVBOX_GIT_PASSWORD"] == "secret-token"

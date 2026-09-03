@@ -296,9 +296,13 @@ class ProcessInfo:
 
     @classmethod
     def from_wire(cls, value: Mapping[str, Any]) -> ProcessInfo:
+        config = value.get("config")
+        process = config if isinstance(config, Mapping) else value
+        cmd = str(_pick(process, "command", "cmd", default=""))
+        args = _string_tuple(process.get("args"))
         return cls(
             pid=_integer(_pick(value, "pid")),
-            command=str(_pick(value, "command", "cmd", default="")),
+            command=" ".join((cmd, *args)).strip(),
             running=bool(_pick(value, "running", default=True)),
             started_at=parse_optional_datetime(
                 _pick(value, "startedAt", "started_at", default=None)
@@ -346,10 +350,15 @@ class FileInfo:
 
     @classmethod
     def from_wire(cls, value: Mapping[str, Any]) -> FileInfo:
+        file_type = {
+            "FILE_TYPE_FILE": FileType.FILE,
+            "FILE_TYPE_DIRECTORY": FileType.DIRECTORY,
+            "FILE_TYPE_SYMLINK": FileType.SYMLINK,
+        }.get(str(_pick(value, "type", default="file")))
         return cls(
             name=str(_pick(value, "name")),
             path=str(_pick(value, "path")),
-            type=FileType(str(_pick(value, "type", default="file"))),
+            type=file_type or FileType(str(_pick(value, "type", default="file"))),
             size=_integer(_pick(value, "size", default=0)),
             mode=_optional_int(value.get("mode")),
             permissions=_optional_str(value.get("permissions")),

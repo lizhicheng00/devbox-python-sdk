@@ -408,13 +408,12 @@ class Sandbox:
         self.close()
 
     def _gateway_transport(self) -> SyncTransport:
-        if not self._connection.gateway_url:
-            raise ProtocolError("sandbox response does not provide an envd endpoint")
+        gateway_url = _gateway_url(self._connection)
         if _expires_soon(self._connection.expires_at):
             self.resume()
         if self._gateway is None:
             self._gateway = SyncTransport(
-                self._connection.gateway_url,
+                gateway_url,
                 headers=_gateway_headers(self._connection),
                 timeout=self._request_timeout,
             )
@@ -603,13 +602,12 @@ class AsyncSandbox:
         await self.close()
 
     async def _gateway_transport(self) -> AsyncTransport:
-        if not self._connection.gateway_url:
-            raise ProtocolError("sandbox response does not provide an envd endpoint")
+        gateway_url = _gateway_url(self._connection)
         if _expires_soon(self._connection.expires_at):
             await self.resume()
         if self._gateway is None:
             self._gateway = AsyncTransport(
-                self._connection.gateway_url,
+                gateway_url,
                 headers=_gateway_headers(self._connection),
                 timeout=self._request_timeout,
             )
@@ -862,6 +860,15 @@ def _id(value: str) -> str:
 
 def _gateway_headers(connection: SandboxConnection) -> dict[str, str]:
     return {"X-Access-Token": connection.access_token, "E2B-Sandbox-Id": connection.sandbox_id}
+
+
+def _gateway_url(connection: SandboxConnection) -> str:
+    url = connection.gateway_url
+    if not url:
+        raise ProtocolError("sandbox response does not provide an EnvD endpoint")
+    if url.removeprefix("https://").endswith(".sandbox.devbox.local"):
+        raise ProtocolError("Manager returned a placeholder EnvD endpoint")
+    return url
 
 
 def _expires_soon(expires_at: datetime | None) -> bool:
