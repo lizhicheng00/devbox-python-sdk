@@ -12,7 +12,8 @@ from ._tls import service_ssl_context
 from ._version import __version__
 from .errors import ProtocolError, raise_connect_error, raise_for_response, transport_error
 
-_IDEMPOTENT_METHODS = {"GET", "HEAD", "OPTIONS"}
+_CONNECT_RETRY_DELAYS = (0.1, 0.2)
+_CONNECT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout)
 _CONNECT_HEADERS = {
     "Connect-Protocol-Version": "1",
     "Content-Type": "application/connect+json",
@@ -152,8 +153,7 @@ class SyncTransport:
         params: QueryParams | None = None,
         headers: Mapping[str, str] | None = None,
     ) -> httpx.Response:
-        attempts = 2 if method.upper() in _IDEMPOTENT_METHODS else 1
-        for attempt in range(attempts):
+        for attempt in range(len(_CONNECT_RETRY_DELAYS) + 1):
             try:
                 response = self._client.request(
                     method,
@@ -163,15 +163,12 @@ class SyncTransport:
                     params=params,
                     headers=headers,
                 )
-                if response.status_code >= 500 and attempt + 1 < attempts:
-                    time.sleep(0.1)
-                    continue
                 if response.is_error:
                     raise_for_response(response)
                 return response
             except Exception as error:
-                if isinstance(error, httpx.TransportError) and attempt + 1 < attempts:
-                    time.sleep(0.1)
+                if isinstance(error, _CONNECT_ERRORS) and attempt < len(_CONNECT_RETRY_DELAYS):
+                    time.sleep(_CONNECT_RETRY_DELAYS[attempt])
                     continue
                 mapped = transport_error(error)
                 if mapped is error:
@@ -315,8 +312,7 @@ class AsyncTransport:
         params: QueryParams | None = None,
         headers: Mapping[str, str] | None = None,
     ) -> httpx.Response:
-        attempts = 2 if method.upper() in _IDEMPOTENT_METHODS else 1
-        for attempt in range(attempts):
+        for attempt in range(len(_CONNECT_RETRY_DELAYS) + 1):
             try:
                 response = await self._client.request(
                     method,
@@ -326,15 +322,12 @@ class AsyncTransport:
                     params=params,
                     headers=headers,
                 )
-                if response.status_code >= 500 and attempt + 1 < attempts:
-                    await asyncio.sleep(0.1)
-                    continue
                 if response.is_error:
                     raise_for_response(response)
                 return response
             except Exception as error:
-                if isinstance(error, httpx.TransportError) and attempt + 1 < attempts:
-                    await asyncio.sleep(0.1)
+                if isinstance(error, _CONNECT_ERRORS) and attempt < len(_CONNECT_RETRY_DELAYS):
+                    await asyncio.sleep(_CONNECT_RETRY_DELAYS[attempt])
                     continue
                 mapped = transport_error(error)
                 if mapped is error:

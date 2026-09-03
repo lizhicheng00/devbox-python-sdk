@@ -8,8 +8,7 @@ def main() -> None:
     with Sandbox.create(template, timeout=300) as sandbox:
         print(f"sandbox: {sandbox.sandbox_id}")
         result = sandbox.commands.run("python --version")
-        print(result.stdout or result.stderr)
-        sandbox.kill()
+        print(result.stdout or result.stderr, end="")
 
 
 if __name__ == "__main__":

@@ -35,17 +35,15 @@ from devbox import Sandbox
 
 with Sandbox.create("python", timeout=300) as sandbox:
     result = sandbox.commands.run("python --version")
-    print(result.stdout)
+    print(result.stdout, end="")
 
     sandbox.files.write("/tmp/message.txt", "hello from DevBox\n")
-    print(sandbox.files.read("/tmp/message.txt"))
-
-    sandbox.kill()
+    print(sandbox.files.read("/tmp/message.txt"), end="")
 ```
 
-`close()` and context-manager exit release local HTTP resources. They do not delete
-the remote sandbox. Use `kill()` when the sandbox should be deleted immediately;
-otherwise its configured timeout applies.
+The context manager deletes the remote sandbox and closes local HTTP resources on
+exit. Without a context manager, call `kill()` to delete the sandbox or `close()`
+to release only local resources and leave the sandbox running until its timeout.
 
 ## Reusable Client
 
@@ -86,8 +84,7 @@ from devbox import AsyncSandbox
 async def main() -> None:
     async with await AsyncSandbox.create("python") as sandbox:
         result = await sandbox.commands.run("uname -a")
-        print(result.stdout)
-        await sandbox.kill()
+        print(result.stdout, end="")
 
 
 asyncio.run(main())
@@ -109,12 +106,15 @@ result = sandbox.commands.run(
 Start a background command when its lifetime should outlive the current request:
 
 ```python
-handle = sandbox.commands.run("python server.py", background=True)
+handle = sandbox.commands.run("python server.py", background=True, timeout=300)
 print(handle.pid)
 
 handle.send_stdin("input\n")
-result = handle.wait(timeout=60)
+result = handle.wait()
 ```
+
+`timeout` bounds the command stream. Use `None` or `0` for a stream without a
+client deadline. Background output callbacks are supplied to `handle.wait()`.
 
 Non-zero foreground exits raise `CommandExitError` by default. Pass `check=False`
 to inspect the result without raising.
@@ -130,6 +130,7 @@ sandbox.files.write_batch(
 )
 
 entries = sandbox.files.list("/workspace")
+exists = sandbox.files.exists("/workspace/app.py")
 sandbox.files.upload("./input.csv", "/workspace/input.csv")
 sandbox.files.download("/workspace/output.csv", "./output.csv")
 ```
@@ -204,8 +205,9 @@ phase-one `/sandboxes` surface. Configuration or lifecycle failures produce a no
 exit code; Manager resources that are not published in this deployment are not probed.
 
 Command, filesystem, PTY, and Git operations use EnvD's ConnectRPC and `/files`
-protocols. They require the Manager to return a real EnvD domain and access token;
-the current placeholder fields support control-plane lifecycle operations only.
+protocols. The Manager supplies the short-lived access token. Deployments with a
+shared data-plane ingress can set `DEVBOX_GATEWAY_URL` instead of returning a
+per-sandbox gateway address.
 
 ## Runtime Validation
 
@@ -243,6 +245,10 @@ environment variables.
 The API key is sent only to the control plane as `X-API-Key`. Create and connect
 responses provide a short-lived sandbox connection token; only that token is sent
 to the gateway. The SDK does not persist either credential.
+
+The SDK retries connection-establishment failures twice. It does not automatically
+retry rate limits, server errors, or requests that may already have reached the
+service. `RateLimitError.retry_after` exposes the server's retry guidance.
 
 ## Development
 

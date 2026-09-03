@@ -9,8 +9,7 @@ async def main() -> None:
     async with await AsyncSandbox.create(template, timeout=300) as sandbox:
         print(f"sandbox: {sandbox.sandbox_id}")
         result = await sandbox.commands.run("python --version")
-        print(result.stdout or result.stderr)
-        await sandbox.kill()
+        print(result.stdout or result.stderr, end="")
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ import base64
 import codecs
 import inspect
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
-from typing import Any
+from typing import Any, Literal, overload
 
 from ._transport import AsyncTransport, SyncTransport
 from .errors import CommandExitError, ProtocolError
@@ -36,13 +36,13 @@ class CommandHandle:
     def wait(
         self,
         *,
-        timeout: float | None = 60,
         on_stdout: OutputHandler | None = None,
         on_stderr: OutputHandler | None = None,
         check: bool = True,
     ) -> CommandResult:
+        """Wait for completion and collect the command output."""
         if self._result is None:
-            events = self._events or self._commands._connect_events(self.pid, timeout)
+            events = self._events or self._commands._connect_events(self.pid, 60)
             self._events = None
             self._result = self._commands._collect_events(events, self.pid, on_stdout, on_stderr)
         if check and self._result.exit_code != 0:
@@ -69,8 +69,42 @@ class CommandHandle:
 
 
 class Commands:
+    """Run and manage processes inside a sandbox."""
+
     def __init__(self, transport: SyncTransportProvider) -> None:
         self._transport = transport
+
+    @overload
+    def run(
+        self,
+        command: str,
+        *,
+        background: Literal[False] = False,
+        envs: Mapping[str, str] | None = None,
+        cwd: str | None = None,
+        user: str | None = None,
+        stdin: bool = False,
+        timeout: float | None = 60,
+        on_stdout: OutputHandler | None = None,
+        on_stderr: OutputHandler | None = None,
+        check: bool = True,
+    ) -> CommandResult: ...
+
+    @overload
+    def run(
+        self,
+        command: str,
+        *,
+        background: Literal[True],
+        envs: Mapping[str, str] | None = None,
+        cwd: str | None = None,
+        user: str | None = None,
+        stdin: bool = False,
+        timeout: float | None = 60,
+        on_stdout: None = None,
+        on_stderr: None = None,
+        check: bool = True,
+    ) -> CommandHandle: ...
 
     def run(
         self,
@@ -86,14 +120,17 @@ class Commands:
         on_stderr: OutputHandler | None = None,
         check: bool = True,
     ) -> CommandResult | CommandHandle:
+        """Run a shell command or return a handle for a background command."""
+        if background and (on_stdout is not None or on_stderr is not None):
+            raise ValueError("background output callbacks belong on handle.wait()")
         handle = self._start(_command_body(command, envs, cwd, stdin), timeout=timeout, user=user)
         if background:
             return handle
         return handle.wait(on_stdout=on_stdout, on_stderr=on_stderr, check=check)
 
-    def connect(self, pid: int) -> CommandHandle:
+    def connect(self, pid: int, *, timeout: float | None = 60) -> CommandHandle:
         _validate_pid(pid)
-        return CommandHandle(pid, self)
+        return CommandHandle(pid, self, self._connect_events(pid, timeout))
 
     def list(self) -> tuple[ProcessInfo, ...]:
         payload = self._transport().connect_unary(f"{_PROCESS}/List", {})
@@ -187,13 +224,12 @@ class AsyncCommandHandle:
     async def wait(
         self,
         *,
-        timeout: float | None = 60,
         on_stdout: AsyncOutputHandler | None = None,
         on_stderr: AsyncOutputHandler | None = None,
         check: bool = True,
     ) -> CommandResult:
         if self._result is None:
-            events = self._events or await self._commands._connect_events(self.pid, timeout)
+            events = self._events or await self._commands._connect_events(self.pid, 60)
             self._events = None
             self._result = await self._commands._collect_events(
                 events, self.pid, on_stdout, on_stderr
@@ -222,8 +258,42 @@ class AsyncCommandHandle:
 
 
 class AsyncCommands:
+    """Run and manage processes through the asynchronous API."""
+
     def __init__(self, transport: AsyncTransportProvider) -> None:
         self._transport = transport
+
+    @overload
+    async def run(
+        self,
+        command: str,
+        *,
+        background: Literal[False] = False,
+        envs: Mapping[str, str] | None = None,
+        cwd: str | None = None,
+        user: str | None = None,
+        stdin: bool = False,
+        timeout: float | None = 60,
+        on_stdout: AsyncOutputHandler | None = None,
+        on_stderr: AsyncOutputHandler | None = None,
+        check: bool = True,
+    ) -> CommandResult: ...
+
+    @overload
+    async def run(
+        self,
+        command: str,
+        *,
+        background: Literal[True],
+        envs: Mapping[str, str] | None = None,
+        cwd: str | None = None,
+        user: str | None = None,
+        stdin: bool = False,
+        timeout: float | None = 60,
+        on_stdout: None = None,
+        on_stderr: None = None,
+        check: bool = True,
+    ) -> AsyncCommandHandle: ...
 
     async def run(
         self,
@@ -239,6 +309,9 @@ class AsyncCommands:
         on_stderr: AsyncOutputHandler | None = None,
         check: bool = True,
     ) -> CommandResult | AsyncCommandHandle:
+        """Run a shell command or return a handle for a background command."""
+        if background and (on_stdout is not None or on_stderr is not None):
+            raise ValueError("background output callbacks belong on handle.wait()")
         handle = await self._start(
             _command_body(command, envs, cwd, stdin), timeout=timeout, user=user
         )
@@ -246,9 +319,9 @@ class AsyncCommands:
             return handle
         return await handle.wait(on_stdout=on_stdout, on_stderr=on_stderr, check=check)
 
-    def connect(self, pid: int) -> AsyncCommandHandle:
+    async def connect(self, pid: int, *, timeout: float | None = 60) -> AsyncCommandHandle:
         _validate_pid(pid)
-        return AsyncCommandHandle(pid, self)
+        return AsyncCommandHandle(pid, self, await self._connect_events(pid, timeout))
 
     async def list(self) -> tuple[ProcessInfo, ...]:
         transport = await self._transport()

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
-from typing import Any
+from typing import Any, cast
 
 from devbox import GitCredentials
+from devbox._transport import SyncTransport
 from devbox.commands import Commands
 from devbox.git import Git
 
@@ -29,7 +30,7 @@ class GitTransport:
 
 def test_git_credentials_are_not_embedded_in_command() -> None:
     transport = GitTransport()
-    git = Git(Commands(lambda: transport))  # type: ignore[arg-type]
+    git = Git(Commands(lambda: cast(SyncTransport, transport)))
 
     git.clone(
         "https://example.test/project.git",

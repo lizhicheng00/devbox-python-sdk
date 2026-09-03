@@ -1,18 +1,17 @@
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from types import TracebackType
 from typing import Any
 from urllib.parse import quote
 from uuid import uuid4
 
-import httpx
-
 from ._transport import AsyncTransport, SyncTransport
 from .commands import AsyncCommands, Commands
 from .config import ConnectionConfig
-from .errors import ErrorDetail, ProtocolError
+from .errors import DevBoxError, ErrorDetail, NotFoundError, ProtocolError
 from .filesystem import AsyncFilesystem, Filesystem
 from .git import AsyncGit, Git
 from .models import (
@@ -32,13 +31,22 @@ from .pty import AsyncPty, Pty
 
 
 class Sandboxes:
-    def __init__(self, transport: SyncTransport, request_timeout: float = 30.0) -> None:
+    """Sandbox lifecycle operations bound to a reusable client."""
+
+    def __init__(
+        self,
+        transport: SyncTransport,
+        request_timeout: float = 30.0,
+        *,
+        gateway_url: str | None = None,
+    ) -> None:
         self._transport = transport
         self._request_timeout = request_timeout
+        self._gateway_url = gateway_url
 
     def create(
         self,
-        template: str = "base",
+        template: str = "default",
         *,
         timeout: int = 300,
         envs: Mapping[str, str] | None = None,
@@ -73,7 +81,13 @@ class Sandboxes:
             headers={"Idempotency-Key": idempotency_key or str(uuid4())},
         )
         info, connection = _sandbox_payload(payload)
-        return Sandbox(self._transport, info, connection, request_timeout=self._request_timeout)
+        return Sandbox(
+            self._transport,
+            info,
+            connection,
+            request_timeout=self._request_timeout,
+            gateway_url=self._gateway_url,
+        )
 
     def connect(self, sandbox_id: str, *, timeout: int = 300) -> Sandbox:
         payload = self._transport.request(
@@ -82,7 +96,13 @@ class Sandboxes:
             json_body={"timeout": _checked_timeout(timeout)},
         )
         info, connection = _sandbox_payload(payload)
-        return Sandbox(self._transport, info, connection, request_timeout=self._request_timeout)
+        return Sandbox(
+            self._transport,
+            info,
+            connection,
+            request_timeout=self._request_timeout,
+            gateway_url=self._gateway_url,
+        )
 
     def get(self, sandbox_id: str) -> SandboxInfo:
         return SandboxInfo.from_wire(
@@ -117,13 +137,22 @@ class Sandboxes:
 
 
 class AsyncSandboxes:
-    def __init__(self, transport: AsyncTransport, request_timeout: float = 30.0) -> None:
+    """Asynchronous sandbox lifecycle operations bound to a reusable client."""
+
+    def __init__(
+        self,
+        transport: AsyncTransport,
+        request_timeout: float = 30.0,
+        *,
+        gateway_url: str | None = None,
+    ) -> None:
         self._transport = transport
         self._request_timeout = request_timeout
+        self._gateway_url = gateway_url
 
     async def create(
         self,
-        template: str = "base",
+        template: str = "default",
         *,
         timeout: int = 300,
         envs: Mapping[str, str] | None = None,
@@ -159,7 +188,11 @@ class AsyncSandboxes:
         )
         info, connection = _sandbox_payload(payload)
         return AsyncSandbox(
-            self._transport, info, connection, request_timeout=self._request_timeout
+            self._transport,
+            info,
+            connection,
+            request_timeout=self._request_timeout,
+            gateway_url=self._gateway_url,
         )
 
     async def connect(self, sandbox_id: str, *, timeout: int = 300) -> AsyncSandbox:
@@ -170,7 +203,11 @@ class AsyncSandboxes:
         )
         info, connection = _sandbox_payload(payload)
         return AsyncSandbox(
-            self._transport, info, connection, request_timeout=self._request_timeout
+            self._transport,
+            info,
+            connection,
+            request_timeout=self._request_timeout,
+            gateway_url=self._gateway_url,
         )
 
     async def get(self, sandbox_id: str) -> SandboxInfo:
@@ -242,7 +279,11 @@ class AsyncSnapshots:
 
 
 class Sandbox:
-    """Connected synchronous sandbox returned by the Manager API."""
+    """A synchronous remote sandbox.
+
+    Exiting its context manager deletes the remote sandbox. Call ``close()``
+    directly when only local connections should be released.
+    """
 
     def __init__(
         self,
@@ -252,12 +293,14 @@ class Sandbox:
         *,
         owns_control: bool = False,
         request_timeout: float = 30.0,
+        gateway_url: str | None = None,
     ) -> None:
         self._control = control
         self._info = info
         self._connection = connection
         self._owns_control = owns_control
         self._request_timeout = request_timeout
+        self._gateway_url_override = gateway_url
         self._gateway: SyncTransport | None = None
         self.commands = Commands(self._gateway_transport)
         self.files = Filesystem(self._gateway_transport)
@@ -265,14 +308,56 @@ class Sandbox:
         self.git = Git(self.commands)
 
     @classmethod
-    def create(cls, template: str = "base", **kwargs: Any) -> Sandbox:
-        api_key = kwargs.pop("api_key", None)
-        api_url = kwargs.pop("api_url", None)
-        request_timeout = float(kwargs.pop("request_timeout", 30.0))
-        http_transport = kwargs.pop("http_transport", None)
-        config, transport = _sync_control(api_key, api_url, request_timeout, http_transport)
+    def create(
+        cls,
+        template: str = "default",
+        *,
+        timeout: int = 300,
+        envs: Mapping[str, str] | None = None,
+        metadata: Mapping[str, str] | None = None,
+        network: NetworkConfig | None = None,
+        auto_pause: bool = False,
+        auto_pause_memory: bool = True,
+        auto_resume: bool = False,
+        secure: bool = True,
+        client_id: str | None = None,
+        build_id: str | None = None,
+        volume_mounts: Sequence[VolumeMount] = (),
+        idempotency_key: str | None = None,
+        api_key: str | None = None,
+        api_url: str | None = None,
+        gateway_url: str | None = None,
+        request_timeout: float = 30.0,
+        headers: Mapping[str, str] | None = None,
+    ) -> Sandbox:
+        """Create a sandbox and connect its runtime APIs."""
+        config, transport = _sync_control(
+            api_key,
+            api_url,
+            gateway_url,
+            request_timeout,
+            headers,
+        )
         try:
-            sandbox = Sandboxes(transport, config.request_timeout).create(template, **kwargs)
+            sandbox = Sandboxes(
+                transport,
+                config.request_timeout,
+                gateway_url=config.gateway_url,
+            ).create(
+                template,
+                timeout=timeout,
+                envs=envs,
+                metadata=metadata,
+                network=network,
+                auto_pause=auto_pause,
+                auto_pause_memory=auto_pause_memory,
+                auto_resume=auto_resume,
+                secure=secure,
+                client_id=client_id,
+                build_id=build_id,
+                volume_mounts=volume_mounts,
+                idempotency_key=idempotency_key,
+            )
         except Exception:
             transport.close()
             raise
@@ -287,14 +372,24 @@ class Sandbox:
         timeout: int = 300,
         api_key: str | None = None,
         api_url: str | None = None,
+        gateway_url: str | None = None,
         request_timeout: float = 30.0,
-        http_transport: httpx.BaseTransport | None = None,
+        headers: Mapping[str, str] | None = None,
     ) -> Sandbox:
-        config, transport = _sync_control(api_key, api_url, request_timeout, http_transport)
+        """Connect to an existing sandbox, resuming it when necessary."""
+        config, transport = _sync_control(
+            api_key,
+            api_url,
+            gateway_url,
+            request_timeout,
+            headers,
+        )
         try:
-            sandbox = Sandboxes(transport, config.request_timeout).connect(
-                sandbox_id, timeout=timeout
-            )
+            sandbox = Sandboxes(
+                transport,
+                config.request_timeout,
+                gateway_url=config.gateway_url,
+            ).connect(sandbox_id, timeout=timeout)
         except Exception:
             transport.close()
             raise
@@ -315,10 +410,19 @@ class Sandbox:
         )
         return self._info
 
+    def is_running(self) -> bool:
+        """Return whether the Manager reports the sandbox as running."""
+        try:
+            return self.get_info().state is SandboxState.RUNNING
+        except NotFoundError:
+            self._info = replace(self._info, state=SandboxState.STOPPED)
+            return False
+
     def pause(self, *, memory: bool = True) -> None:
         self._control.request(
             "POST", f"/sandboxes/{_id(self.sandbox_id)}/pause", json_body={"memory": memory}
         )
+        self._info = replace(self._info, state=SandboxState.PAUSED)
         self._close_gateway()
 
     def resume(self, *, timeout: int = 300) -> None:
@@ -344,9 +448,17 @@ class Sandbox:
             json_body={"duration": _checked_timeout(duration)},
         )
 
-    def kill(self) -> None:
-        self._control.request("DELETE", f"/sandboxes/{_id(self.sandbox_id)}")
-        self._close_gateway()
+    def kill(self) -> bool:
+        """Delete the sandbox, returning whether it still existed."""
+        try:
+            self._control.request("DELETE", f"/sandboxes/{_id(self.sandbox_id)}")
+        except NotFoundError:
+            self._info = replace(self._info, state=SandboxState.STOPPED)
+            return False
+        finally:
+            self._close_gateway()
+        self._info = replace(self._info, state=SandboxState.STOPPED)
+        return True
 
     def snapshot(self, name: str | None = None) -> SnapshotInfo:
         payload = self._control.request(
@@ -363,7 +475,13 @@ class Sandbox:
             json_body=_fork_body(timeout, count),
         )
         return tuple(
-            _fork_result(item, self._control, self._request_timeout) for item in _items(payload)
+            _fork_result(
+                item,
+                self._control,
+                self._request_timeout,
+                self._gateway_url_override,
+            )
+            for item in _items(payload)
         )
 
     def get_logs(
@@ -398,6 +516,7 @@ class Sandbox:
         )
 
     def close(self) -> None:
+        """Close local connections without deleting the remote sandbox."""
         self._close_gateway()
         if self._owns_control:
             self._control.close()
@@ -405,16 +524,26 @@ class Sandbox:
     def __enter__(self) -> Sandbox:
         return self
 
-    def __exit__(self, *args: object) -> None:
-        self.close()
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        try:
+            self.kill()
+        except DevBoxError:
+            if exc_type is None:
+                raise
+        finally:
+            self.close()
 
     def _gateway_transport(self) -> SyncTransport:
-        gateway_url = _gateway_url(self._connection)
         if _expires_soon(self._connection.expires_at):
             self.resume()
         if self._gateway is None:
             self._gateway = SyncTransport(
-                gateway_url,
+                _gateway_url(self._connection, self._gateway_url_override),
                 headers=_gateway_headers(self._connection),
                 timeout=self._request_timeout,
             )
@@ -431,7 +560,7 @@ class Sandbox:
 
 
 class AsyncSandbox:
-    """Connected asynchronous sandbox returned by the Manager API."""
+    """An asynchronous remote sandbox with automatic context cleanup."""
 
     def __init__(
         self,
@@ -441,12 +570,14 @@ class AsyncSandbox:
         *,
         owns_control: bool = False,
         request_timeout: float = 30.0,
+        gateway_url: str | None = None,
     ) -> None:
         self._control = control
         self._info = info
         self._connection = connection
         self._owns_control = owns_control
         self._request_timeout = request_timeout
+        self._gateway_url_override = gateway_url
         self._gateway: AsyncTransport | None = None
         self.commands = AsyncCommands(self._gateway_transport)
         self.files = AsyncFilesystem(self._gateway_transport)
@@ -454,15 +585,55 @@ class AsyncSandbox:
         self.git = AsyncGit(self.commands)
 
     @classmethod
-    async def create(cls, template: str = "base", **kwargs: Any) -> AsyncSandbox:
-        api_key = kwargs.pop("api_key", None)
-        api_url = kwargs.pop("api_url", None)
-        request_timeout = float(kwargs.pop("request_timeout", 30.0))
-        http_transport = kwargs.pop("http_transport", None)
-        config, transport = _async_control(api_key, api_url, request_timeout, http_transport)
+    async def create(
+        cls,
+        template: str = "default",
+        *,
+        timeout: int = 300,
+        envs: Mapping[str, str] | None = None,
+        metadata: Mapping[str, str] | None = None,
+        network: NetworkConfig | None = None,
+        auto_pause: bool = False,
+        auto_pause_memory: bool = True,
+        auto_resume: bool = False,
+        secure: bool = True,
+        client_id: str | None = None,
+        build_id: str | None = None,
+        volume_mounts: Sequence[VolumeMount] = (),
+        idempotency_key: str | None = None,
+        api_key: str | None = None,
+        api_url: str | None = None,
+        gateway_url: str | None = None,
+        request_timeout: float = 30.0,
+        headers: Mapping[str, str] | None = None,
+    ) -> AsyncSandbox:
+        """Create a sandbox and connect its runtime APIs."""
+        config, transport = _async_control(
+            api_key,
+            api_url,
+            gateway_url,
+            request_timeout,
+            headers,
+        )
         try:
-            sandbox = await AsyncSandboxes(transport, config.request_timeout).create(
-                template, **kwargs
+            sandbox = await AsyncSandboxes(
+                transport,
+                config.request_timeout,
+                gateway_url=config.gateway_url,
+            ).create(
+                template,
+                timeout=timeout,
+                envs=envs,
+                metadata=metadata,
+                network=network,
+                auto_pause=auto_pause,
+                auto_pause_memory=auto_pause_memory,
+                auto_resume=auto_resume,
+                secure=secure,
+                client_id=client_id,
+                build_id=build_id,
+                volume_mounts=volume_mounts,
+                idempotency_key=idempotency_key,
             )
         except Exception:
             await transport.close()
@@ -478,14 +649,24 @@ class AsyncSandbox:
         timeout: int = 300,
         api_key: str | None = None,
         api_url: str | None = None,
+        gateway_url: str | None = None,
         request_timeout: float = 30.0,
-        http_transport: httpx.AsyncBaseTransport | None = None,
+        headers: Mapping[str, str] | None = None,
     ) -> AsyncSandbox:
-        config, transport = _async_control(api_key, api_url, request_timeout, http_transport)
+        """Connect to an existing sandbox, resuming it when necessary."""
+        config, transport = _async_control(
+            api_key,
+            api_url,
+            gateway_url,
+            request_timeout,
+            headers,
+        )
         try:
-            sandbox = await AsyncSandboxes(transport, config.request_timeout).connect(
-                sandbox_id, timeout=timeout
-            )
+            sandbox = await AsyncSandboxes(
+                transport,
+                config.request_timeout,
+                gateway_url=config.gateway_url,
+            ).connect(sandbox_id, timeout=timeout)
         except Exception:
             await transport.close()
             raise
@@ -506,10 +687,19 @@ class AsyncSandbox:
         )
         return self._info
 
+    async def is_running(self) -> bool:
+        """Return whether the Manager reports the sandbox as running."""
+        try:
+            return (await self.get_info()).state is SandboxState.RUNNING
+        except NotFoundError:
+            self._info = replace(self._info, state=SandboxState.STOPPED)
+            return False
+
     async def pause(self, *, memory: bool = True) -> None:
         await self._control.request(
             "POST", f"/sandboxes/{_id(self.sandbox_id)}/pause", json_body={"memory": memory}
         )
+        self._info = replace(self._info, state=SandboxState.PAUSED)
         await self._close_gateway()
 
     async def resume(self, *, timeout: int = 300) -> None:
@@ -535,9 +725,17 @@ class AsyncSandbox:
             json_body={"duration": _checked_timeout(duration)},
         )
 
-    async def kill(self) -> None:
-        await self._control.request("DELETE", f"/sandboxes/{_id(self.sandbox_id)}")
-        await self._close_gateway()
+    async def kill(self) -> bool:
+        """Delete the sandbox, returning whether it still existed."""
+        try:
+            await self._control.request("DELETE", f"/sandboxes/{_id(self.sandbox_id)}")
+        except NotFoundError:
+            self._info = replace(self._info, state=SandboxState.STOPPED)
+            return False
+        finally:
+            await self._close_gateway()
+        self._info = replace(self._info, state=SandboxState.STOPPED)
+        return True
 
     async def snapshot(self, name: str | None = None) -> SnapshotInfo:
         payload = await self._control.request(
@@ -556,7 +754,12 @@ class AsyncSandbox:
             json_body=_fork_body(timeout, count),
         )
         return tuple(
-            _async_fork_result(item, self._control, self._request_timeout)
+            _async_fork_result(
+                item,
+                self._control,
+                self._request_timeout,
+                self._gateway_url_override,
+            )
             for item in _items(payload)
         )
 
@@ -592,6 +795,7 @@ class AsyncSandbox:
         )
 
     async def close(self) -> None:
+        """Close local connections without deleting the remote sandbox."""
         await self._close_gateway()
         if self._owns_control:
             await self._control.close()
@@ -599,16 +803,26 @@ class AsyncSandbox:
     async def __aenter__(self) -> AsyncSandbox:
         return self
 
-    async def __aexit__(self, *args: object) -> None:
-        await self.close()
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        try:
+            await self.kill()
+        except DevBoxError:
+            if exc_type is None:
+                raise
+        finally:
+            await self.close()
 
     async def _gateway_transport(self) -> AsyncTransport:
-        gateway_url = _gateway_url(self._connection)
         if _expires_soon(self._connection.expires_at):
             await self.resume()
         if self._gateway is None:
             self._gateway = AsyncTransport(
-                gateway_url,
+                _gateway_url(self._connection, self._gateway_url_override),
                 headers=_gateway_headers(self._connection),
                 timeout=self._request_timeout,
             )
@@ -624,49 +838,57 @@ class AsyncSandbox:
             self._gateway = None
 
 
+@dataclass(frozen=True, slots=True)
 class SandboxForkResult:
-    def __init__(self, sandbox: Sandbox | None, error: ErrorDetail | None) -> None:
-        self.sandbox = sandbox
-        self.error = error
+    sandbox: Sandbox | None
+    error: ErrorDetail | None
 
 
+@dataclass(frozen=True, slots=True)
 class AsyncSandboxForkResult:
-    def __init__(self, sandbox: AsyncSandbox | None, error: ErrorDetail | None) -> None:
-        self.sandbox = sandbox
-        self.error = error
+    sandbox: AsyncSandbox | None
+    error: ErrorDetail | None
 
 
 def _sync_control(
     api_key: str | None,
     api_url: str | None,
+    gateway_url: str | None,
     request_timeout: float,
-    http_transport: httpx.BaseTransport | None,
+    headers: Mapping[str, str] | None,
 ) -> tuple[ConnectionConfig, SyncTransport]:
     config = ConnectionConfig.resolve(
-        api_key=api_key, api_url=api_url, request_timeout=request_timeout
+        api_key=api_key,
+        api_url=api_url,
+        gateway_url=gateway_url,
+        request_timeout=request_timeout,
+        headers=headers,
     )
     return config, SyncTransport(
         config.api_url,
         headers={**config.headers, "X-API-Key": config.api_key},
         timeout=config.request_timeout,
-        transport=http_transport,
     )
 
 
 def _async_control(
     api_key: str | None,
     api_url: str | None,
+    gateway_url: str | None,
     request_timeout: float,
-    http_transport: httpx.AsyncBaseTransport | None,
+    headers: Mapping[str, str] | None,
 ) -> tuple[ConnectionConfig, AsyncTransport]:
     config = ConnectionConfig.resolve(
-        api_key=api_key, api_url=api_url, request_timeout=request_timeout
+        api_key=api_key,
+        api_url=api_url,
+        gateway_url=gateway_url,
+        request_timeout=request_timeout,
+        headers=headers,
     )
     return config, AsyncTransport(
         config.api_url,
         headers={**config.headers, "X-API-Key": config.api_key},
         timeout=config.request_timeout,
-        transport=http_transport,
     )
 
 
@@ -720,7 +942,7 @@ def _sandbox_page(value: object, next_token: str | None, total: str | None) -> P
     return Page(
         tuple(SandboxInfo.from_wire(item) for item in _items(value)),
         next_token or None,
-        int(total) if total else None,
+        _response_integer(total, "X-Total-Running") if total else None,
     )
 
 
@@ -801,24 +1023,42 @@ def _fork_body(timeout: int, count: int) -> dict[str, int]:
 
 
 def _fork_result(
-    value: Mapping[str, Any], control: SyncTransport, request_timeout: float
+    value: Mapping[str, Any],
+    control: SyncTransport,
+    request_timeout: float,
+    gateway_url: str | None = None,
 ) -> SandboxForkResult:
     raw = value.get("sandbox")
     sandbox = None
     if isinstance(raw, Mapping):
         info, connection = _sandbox_payload(raw)
-        sandbox = Sandbox(control, info, connection, request_timeout=request_timeout)
+        sandbox = Sandbox(
+            control,
+            info,
+            connection,
+            request_timeout=request_timeout,
+            gateway_url=gateway_url,
+        )
     return SandboxForkResult(sandbox, _error_detail(value.get("error")))
 
 
 def _async_fork_result(
-    value: Mapping[str, Any], control: AsyncTransport, request_timeout: float
+    value: Mapping[str, Any],
+    control: AsyncTransport,
+    request_timeout: float,
+    gateway_url: str | None = None,
 ) -> AsyncSandboxForkResult:
     raw = value.get("sandbox")
     sandbox = None
     if isinstance(raw, Mapping):
         info, connection = _sandbox_payload(raw)
-        sandbox = AsyncSandbox(control, info, connection, request_timeout=request_timeout)
+        sandbox = AsyncSandbox(
+            control,
+            info,
+            connection,
+            request_timeout=request_timeout,
+            gateway_url=gateway_url,
+        )
     return AsyncSandboxForkResult(sandbox, _error_detail(value.get("error")))
 
 
@@ -853,6 +1093,13 @@ def _checked_timeout(timeout: int) -> int:
     return timeout
 
 
+def _response_integer(value: str, field: str) -> int:
+    try:
+        return int(value)
+    except ValueError as error:
+        raise ProtocolError(f"DevBox response header is not an integer: {field}") from error
+
+
 def _id(value: str) -> str:
     if not value:
         raise ValueError("identifier must not be blank")
@@ -863,13 +1110,9 @@ def _gateway_headers(connection: SandboxConnection) -> dict[str, str]:
     return {"X-Access-Token": connection.access_token, "E2B-Sandbox-Id": connection.sandbox_id}
 
 
-def _gateway_url(connection: SandboxConnection) -> str:
-    configured_url = os.getenv("DEVBOX_GATEWAY_URL", "").strip().rstrip("/")
+def _gateway_url(connection: SandboxConnection, configured_url: str | None = None) -> str:
     if configured_url:
-        if not configured_url.startswith("https://"):
-            raise ProtocolError("DEVBOX_GATEWAY_URL must start with https://")
         return configured_url
-
     url = connection.gateway_url
     if not url:
         raise ProtocolError("sandbox response does not provide an EnvD endpoint")

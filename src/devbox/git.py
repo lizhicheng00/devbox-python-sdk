@@ -101,14 +101,11 @@ class Git:
         credentials: GitCredentials | None = None,
         timeout: float | None = 60,
     ) -> CommandResult:
-        result = self._commands.run(
+        return self._commands.run(
             _shell_command(command, credentials),
             envs=_credential_env(credentials),
             timeout=timeout,
         )
-        if not isinstance(result, CommandResult):
-            raise AssertionError("foreground git command returned a background handle")
-        return result
 
 
 class AsyncGit:
@@ -196,14 +193,11 @@ class AsyncGit:
         credentials: GitCredentials | None = None,
         timeout: float | None = 60,
     ) -> CommandResult:
-        result = await self._commands.run(
+        return await self._commands.run(
             _shell_command(command, credentials),
             envs=_credential_env(credentials),
             timeout=timeout,
         )
-        if not isinstance(result, CommandResult):
-            raise AssertionError("foreground git command returned a background handle")
-        return result
 
 
 def _in(repository: str, *arguments: str) -> list[str]:

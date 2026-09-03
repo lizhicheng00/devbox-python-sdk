@@ -89,7 +89,7 @@ def validate_filesystem(sandbox: Sandbox) -> None:
         raise AssertionError("filesystem content does not match")
     print(f"stat: {sandbox.files.stat(path)}")
     print(f"list: {sandbox.files.list(directory)}")
-    sandbox.files.remove(directory, recursive=True)
+    sandbox.files.remove(directory)
     print("remove: ok")
 
 

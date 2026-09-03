@@ -7,8 +7,6 @@ import httpx
 
 from ._transport import AsyncTransport, SyncTransport
 from .config import ConnectionConfig
-from .errors import ProtocolError
-from .models import HealthInfo
 from .nodes import AsyncNodes, Nodes
 from .sandbox import AsyncSandboxes, AsyncSnapshots, Sandboxes, Snapshots
 from .templates import AsyncTemplates, Templates
@@ -22,6 +20,7 @@ class DevBox:
         *,
         api_key: str | None = None,
         api_url: str | None = None,
+        gateway_url: str | None = None,
         request_timeout: float = 30.0,
         headers: Mapping[str, str] | None = None,
         http_transport: httpx.BaseTransport | None = None,
@@ -29,6 +28,7 @@ class DevBox:
         config = ConnectionConfig.resolve(
             api_key=api_key,
             api_url=api_url,
+            gateway_url=gateway_url,
             request_timeout=request_timeout,
             headers=headers,
         )
@@ -39,16 +39,14 @@ class DevBox:
             timeout=config.request_timeout,
             transport=http_transport,
         )
-        self.sandboxes = Sandboxes(self._transport, config.request_timeout)
+        self.sandboxes = Sandboxes(
+            self._transport,
+            config.request_timeout,
+            gateway_url=config.gateway_url,
+        )
         self.snapshots = Snapshots(self._transport)
         self.templates = Templates(self._transport)
         self.nodes = Nodes(self._transport)
-
-    def health(self) -> HealthInfo:
-        payload = self._transport.request("GET", "/health")
-        if not isinstance(payload, dict):
-            raise ProtocolError("health response is invalid")
-        return HealthInfo.from_wire(payload)
 
     def close(self) -> None:
         self._transport.close()
@@ -73,6 +71,7 @@ class AsyncDevBox:
         *,
         api_key: str | None = None,
         api_url: str | None = None,
+        gateway_url: str | None = None,
         request_timeout: float = 30.0,
         headers: Mapping[str, str] | None = None,
         http_transport: httpx.AsyncBaseTransport | None = None,
@@ -80,6 +79,7 @@ class AsyncDevBox:
         config = ConnectionConfig.resolve(
             api_key=api_key,
             api_url=api_url,
+            gateway_url=gateway_url,
             request_timeout=request_timeout,
             headers=headers,
         )
@@ -90,16 +90,14 @@ class AsyncDevBox:
             timeout=config.request_timeout,
             transport=http_transport,
         )
-        self.sandboxes = AsyncSandboxes(self._transport, config.request_timeout)
+        self.sandboxes = AsyncSandboxes(
+            self._transport,
+            config.request_timeout,
+            gateway_url=config.gateway_url,
+        )
         self.snapshots = AsyncSnapshots(self._transport)
         self.templates = AsyncTemplates(self._transport)
         self.nodes = AsyncNodes(self._transport)
-
-    async def health(self) -> HealthInfo:
-        payload = await self._transport.request("GET", "/health")
-        if not isinstance(payload, dict):
-            raise ProtocolError("health response is invalid")
-        return HealthInfo.from_wire(payload)
 
     async def close(self) -> None:
         await self._transport.close()

@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 
 import httpx
 import pytest
 
-from devbox import AsyncDevBox, DevBox, NetworkConfig, RateLimitError, SandboxState
-from devbox.errors import ProtocolError
+from devbox import (
+    AsyncDevBox,
+    ConfigurationError,
+    DevBox,
+    NetworkConfig,
+    ProtocolError,
+    RateLimitError,
+    SandboxState,
+)
+from devbox.config import ConnectionConfig
 from devbox.models import SandboxConnection
 from devbox.sandbox import _gateway_url
 
@@ -154,31 +163,107 @@ async def test_async_client_uses_same_contract() -> None:
     assert sandbox.sandbox_id == "sbx_async"
 
 
+@pytest.mark.asyncio
+async def test_async_sandbox_context_deletes_remote_sandbox() -> None:
+    methods: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        methods.append(request.method)
+        if request.method == "POST":
+            return httpx.Response(201, json=connection_response("sbx_async"))
+        return httpx.Response(204)
+
+    async with AsyncDevBox(
+        api_key="secret",
+        api_url="https://api.test",
+        http_transport=httpx.MockTransport(handler),
+    ) as api:
+        async with await api.sandboxes.create() as sandbox:
+            assert sandbox.sandbox_id == "sbx_async"
+        assert sandbox.info.state is SandboxState.STOPPED
+
+    assert methods == ["POST", "DELETE"]
+
+
+def test_invalid_pagination_header_is_a_protocol_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[], headers={"X-Total-Running": "invalid"})
+
+    with client(handler) as api, pytest.raises(ProtocolError, match="X-Total-Running"):
+        api.sandboxes.list()
+
+
 def test_https_gateway_url_can_override_manager_placeholder(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("DEVBOX_GATEWAY_URL", "https://gateway.example.test/")
+    config = ConnectionConfig.resolve(api_key="secret")
     connection = SandboxConnection(
         sandbox_id="sbx_123",
         gateway_url="https://sbx_123.sandbox.devbox.local",
         access_token="token",
     )
 
-    assert _gateway_url(connection) == "https://gateway.example.test"
+    assert _gateway_url(connection, config.gateway_url) == "https://gateway.example.test"
 
 
 def test_gateway_url_override_requires_https(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DEVBOX_GATEWAY_URL", "http://gateway.example.test")
-    connection = SandboxConnection("sbx_123", "", "token")
 
-    with pytest.raises(ProtocolError, match="must start with https"):
-        _gateway_url(connection)
+    with pytest.raises(ConfigurationError, match="must use https"):
+        ConnectionConfig.resolve(api_key="secret")
 
 
-def client(handler: object) -> DevBox:
+def test_sandbox_context_deletes_remote_sandbox() -> None:
+    methods: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        methods.append(request.method)
+        if request.method == "POST":
+            return httpx.Response(201, json=connection_response())
+        return httpx.Response(204)
+
+    with client(handler) as api:
+        with api.sandboxes.create() as sandbox:
+            assert sandbox.sandbox_id == "sbx_123"
+        assert sandbox.info.state is SandboxState.STOPPED
+
+    assert methods == ["POST", "DELETE"]
+
+
+def test_kill_is_idempotent() -> None:
+    delete_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal delete_count
+        if request.method == "POST":
+            return httpx.Response(201, json=connection_response())
+        delete_count += 1
+        if delete_count == 1:
+            return httpx.Response(204)
+        return httpx.Response(404, json={"code": "not_found", "message": "not found"})
+
+    with client(handler) as api:
+        sandbox = api.sandboxes.create()
+        assert sandbox.kill() is True
+        assert sandbox.kill() is False
+
+
+def test_is_running_returns_false_when_sandbox_is_missing() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(201, json=connection_response())
+        return httpx.Response(404, json={"code": "not_found", "message": "not found"})
+
+    with client(handler) as api:
+        sandbox = api.sandboxes.create()
+        assert sandbox.is_running() is False
+
+
+def client(handler: Callable[[httpx.Request], httpx.Response]) -> DevBox:
     return DevBox(
         api_key="secret", api_url="https://api.test", http_transport=httpx.MockTransport(handler)
-    )  # type: ignore[arg-type]
+    )
 
 
 def connection_response(sandbox_id: str = "sbx_123") -> dict[str, object]:

@@ -59,7 +59,7 @@ def test_files_use_rest_content_and_connect_metadata() -> None:
 def test_list_uses_envd_rpc_shape() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/filesystem.Filesystem/ListDir"
-        assert json.loads(request.content) == {"path": "/tmp", "depth": 1}
+        assert json.loads(request.content) == {"path": "/tmp", "depth": 2}
         return httpx.Response(
             200,
             json={
@@ -75,9 +75,20 @@ def test_list_uses_envd_rpc_shape() -> None:
         )
 
     with _transport(handler) as transport:
-        entries = Filesystem(lambda: transport).list("/tmp")
+        entries = Filesystem(lambda: transport).list("/tmp", depth=2)
 
     assert entries[0].type is FileType.DIRECTORY
+
+
+def test_exists_maps_not_found_to_false() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            404,
+            json={"error": {"code": "not_found", "message": "file not found"}},
+        )
+
+    with _transport(handler) as transport:
+        assert Filesystem(lambda: transport).exists("/tmp/missing") is False
 
 
 def test_sandbox_path_must_be_absolute() -> None:

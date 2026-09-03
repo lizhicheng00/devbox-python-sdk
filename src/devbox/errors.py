@@ -2,9 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, NoReturn
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import httpx
+
+if TYPE_CHECKING:
+    from .models import CommandResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,19 +88,19 @@ class ProtocolError(DevBoxError):
 
 
 class CommandExitError(DevBoxError):
-    def __init__(self, result: Any) -> None:
+    def __init__(self, result: CommandResult) -> None:
         super().__init__(f"command exited with status {result.exit_code}", code="COMMAND_EXIT")
         self.result = result
 
 
-def transport_error(error: Exception) -> DevBoxError:
+def transport_error(error: Exception) -> Exception:
     if isinstance(error, httpx.TimeoutException):
         return RequestTimeoutError("request timed out")
     if isinstance(error, httpx.HTTPError):
         return ServiceUnavailableError("unable to reach DevBox service")
     if isinstance(error, DevBoxError):
         return error
-    return ServiceUnavailableError("DevBox request failed")
+    return error
 
 
 def raise_for_response(response: httpx.Response) -> NoReturn:
@@ -186,4 +191,10 @@ def _retry_after(value: str | None) -> float | None:
     try:
         return float(value)
     except ValueError:
-        return None
+        try:
+            retry_at = parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())

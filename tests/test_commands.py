@@ -89,6 +89,15 @@ def test_background_command_keeps_stream_and_sends_base64_input() -> None:
     }
 
 
+def test_background_callbacks_are_attached_when_waiting() -> None:
+    with _transport(lambda request: httpx.Response(500)) as transport:
+        commands = Commands(lambda: transport)
+        with pytest.raises(ValueError, match=r"handle\.wait"):
+            commands.run(  # type: ignore[call-overload]
+                "echo ready", background=True, on_stdout=lambda chunk: None
+            )
+
+
 @pytest.mark.asyncio
 async def test_async_command_uses_the_same_protocol() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:

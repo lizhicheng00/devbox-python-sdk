@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from ._transport import AsyncTransport, SyncTransport
-from .errors import ProtocolError
+from .errors import NotFoundError, ProtocolError
 from .models import FileInfo
 
 SyncTransportProvider = Callable[[], SyncTransport]
@@ -15,6 +15,8 @@ _FILESYSTEM = "/filesystem.Filesystem"
 
 
 class Filesystem:
+    """Read and modify the filesystem inside a sandbox."""
+
     def __init__(self, transport: SyncTransportProvider) -> None:
         self._transport = transport
 
@@ -30,9 +32,7 @@ class Filesystem:
         data: str | bytes,
         *,
         encoding: str = "utf-8",
-        mode: int | None = None,
     ) -> FileInfo:
-        _validate_mode(mode)
         content = data.encode(encoding) if isinstance(data, str) else data
         payload = self._transport().request_content(
             "POST",
@@ -48,9 +48,11 @@ class Filesystem:
     ) -> tuple[FileInfo, ...]:
         return tuple(self.write(path, data, encoding=encoding) for path, data in files.items())
 
-    def list(self, path: str) -> tuple[FileInfo, ...]:
+    def list(self, path: str, *, depth: int = 1) -> tuple[FileInfo, ...]:
+        if depth < 1:
+            raise ValueError("depth must be positive")
         payload = self._transport().connect_unary(
-            f"{_FILESYSTEM}/ListDir", {"path": _path(path), "depth": 1}
+            f"{_FILESYSTEM}/ListDir", {"path": _path(path), "depth": depth}
         )
         return tuple(FileInfo.from_wire(item) for item in _items(payload, "entries"))
 
@@ -58,10 +60,14 @@ class Filesystem:
         payload = self._transport().connect_unary(f"{_FILESYSTEM}/Stat", {"path": _path(path)})
         return FileInfo.from_wire(_entry(payload))
 
-    def make_dir(self, path: str, *, parents: bool = True, mode: int | None = None) -> None:
-        if not parents:
-            raise ValueError("EnvD creates parent directories automatically")
-        _validate_mode(mode, directory=True)
+    def exists(self, path: str) -> bool:
+        try:
+            self.stat(path)
+            return True
+        except NotFoundError:
+            return False
+
+    def make_dir(self, path: str) -> None:
         self._transport().connect_unary(f"{_FILESYSTEM}/MakeDir", {"path": _path(path)})
 
     def move(self, source: str, destination: str) -> None:
@@ -70,8 +76,7 @@ class Filesystem:
             {"source": _path(source), "destination": _path(destination)},
         )
 
-    def remove(self, path: str, *, recursive: bool = False) -> None:
-        del recursive
+    def remove(self, path: str) -> None:
         self._transport().connect_unary(f"{_FILESYSTEM}/Remove", {"path": _path(path)})
 
     def upload(self, local_path: str | Path, remote_path: str) -> FileInfo:
@@ -82,16 +87,28 @@ class Filesystem:
         destination.write_bytes(self.read_bytes(remote_path))
         return destination
 
-    def watch(self, path: str) -> Iterator[Mapping[str, Any]]:
+    def watch(
+        self,
+        path: str,
+        *,
+        recursive: bool = False,
+        include_entry: bool = True,
+    ) -> Iterator[Mapping[str, Any]]:
         events = self._transport().connect_stream(
             f"{_FILESYSTEM}/WatchDir",
-            {"path": _path(path), "recursive": False, "includeEntry": True},
+            {
+                "path": _path(path),
+                "recursive": recursive,
+                "includeEntry": include_entry,
+            },
             timeout=None,
         )
         yield from _filesystem_events(events)
 
 
 class AsyncFilesystem:
+    """Read and modify the sandbox filesystem asynchronously."""
+
     def __init__(self, transport: AsyncTransportProvider) -> None:
         self._transport = transport
 
@@ -108,9 +125,7 @@ class AsyncFilesystem:
         data: str | bytes,
         *,
         encoding: str = "utf-8",
-        mode: int | None = None,
     ) -> FileInfo:
-        _validate_mode(mode)
         content = data.encode(encoding) if isinstance(data, str) else data
         transport = await self._transport()
         payload = await transport.request_content(
@@ -130,10 +145,12 @@ class AsyncFilesystem:
             result.append(await self.write(path, data, encoding=encoding))
         return tuple(result)
 
-    async def list(self, path: str) -> tuple[FileInfo, ...]:
+    async def list(self, path: str, *, depth: int = 1) -> tuple[FileInfo, ...]:
+        if depth < 1:
+            raise ValueError("depth must be positive")
         transport = await self._transport()
         payload = await transport.connect_unary(
-            f"{_FILESYSTEM}/ListDir", {"path": _path(path), "depth": 1}
+            f"{_FILESYSTEM}/ListDir", {"path": _path(path), "depth": depth}
         )
         return tuple(FileInfo.from_wire(item) for item in _items(payload, "entries"))
 
@@ -142,10 +159,14 @@ class AsyncFilesystem:
         payload = await transport.connect_unary(f"{_FILESYSTEM}/Stat", {"path": _path(path)})
         return FileInfo.from_wire(_entry(payload))
 
-    async def make_dir(self, path: str, *, parents: bool = True, mode: int | None = None) -> None:
-        if not parents:
-            raise ValueError("EnvD creates parent directories automatically")
-        _validate_mode(mode, directory=True)
+    async def exists(self, path: str) -> bool:
+        try:
+            await self.stat(path)
+            return True
+        except NotFoundError:
+            return False
+
+    async def make_dir(self, path: str) -> None:
         transport = await self._transport()
         await transport.connect_unary(f"{_FILESYSTEM}/MakeDir", {"path": _path(path)})
 
@@ -156,8 +177,7 @@ class AsyncFilesystem:
             {"source": _path(source), "destination": _path(destination)},
         )
 
-    async def remove(self, path: str, *, recursive: bool = False) -> None:
-        del recursive
+    async def remove(self, path: str) -> None:
         transport = await self._transport()
         await transport.connect_unary(f"{_FILESYSTEM}/Remove", {"path": _path(path)})
 
@@ -169,11 +189,21 @@ class AsyncFilesystem:
         destination.write_bytes(await self.read_bytes(remote_path))
         return destination
 
-    async def watch(self, path: str) -> AsyncIterator[Mapping[str, Any]]:
+    async def watch(
+        self,
+        path: str,
+        *,
+        recursive: bool = False,
+        include_entry: bool = True,
+    ) -> AsyncIterator[Mapping[str, Any]]:
         transport = await self._transport()
         events = transport.connect_stream(
             f"{_FILESYSTEM}/WatchDir",
-            {"path": _path(path), "recursive": False, "includeEntry": True},
+            {
+                "path": _path(path),
+                "recursive": recursive,
+                "includeEntry": include_entry,
+            },
             timeout=None,
         )
         async for response in events:
@@ -197,12 +227,6 @@ def _filesystem_event(response: Mapping[str, Any]) -> Mapping[str, Any] | None:
         return None
     value = event.get("filesystem")
     return value if isinstance(value, Mapping) else None
-
-
-def _validate_mode(mode: int | None, *, directory: bool = False) -> None:
-    default = 0o755 if directory else 0o644
-    if mode is not None and mode != default:
-        raise ValueError(f"EnvD currently creates this path with mode {default:o}")
 
 
 def _path(value: str) -> str:

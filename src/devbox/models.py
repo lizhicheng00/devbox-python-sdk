@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Generic, TypeVar
 
+from .errors import ProtocolError
+
 
 class SandboxState(str, Enum):
     CREATING = "creating"
@@ -18,32 +20,15 @@ class SandboxState(str, Enum):
     FAILED = "failed"
 
 
-class LifecycleEventType(str, Enum):
-    CREATED = "created"
-    UPDATED = "updated"
-    PAUSED = "paused"
-    RESUMED = "resumed"
-    CHECKPOINTED = "checkpointed"
-    KILLED = "killed"
-
-
 class FileType(str, Enum):
     FILE = "file"
     DIRECTORY = "directory"
     SYMLINK = "symlink"
 
 
-class TemplateBuildStatus(str, Enum):
-    QUEUED = "queued"
-    BUILDING = "building"
-    READY = "ready"
-    FAILED = "failed"
-    CANCELED = "canceled"
-
-
 @dataclass(frozen=True, slots=True)
 class NetworkRule:
-    headers: Mapping[str, str] = field(default_factory=dict)
+    headers: Mapping[str, str] = field(default_factory=dict, repr=False)
 
     def to_wire(self) -> dict[str, object]:
         return {"transform": {"headers": dict(self.headers)}}
@@ -142,9 +127,9 @@ class SandboxInfo:
         return cls(
             sandbox_id=str(_pick(value, "sandboxId", "sandboxID", "sandbox_id", "id")),
             template_id=str(
-                _pick(value, "templateId", "templateID", "template_id", default="base")
+                _pick(value, "templateId", "templateID", "template_id", default="default")
             ),
-            state=SandboxState(str(_pick(value, "state", "status", default="running"))),
+            state=_enum(SandboxState, _pick(value, "state", "status", default="running")),
             client_id=str(_pick(value, "clientID", "client_id", default="")),
             alias=_optional_str(value.get("alias")),
             started_at=parse_optional_datetime(
@@ -281,7 +266,7 @@ class SandboxLogEntry:
     def from_wire(cls, value: Mapping[str, Any]) -> SandboxLogEntry:
         return cls(
             timestamp=parse_datetime(_pick(value, "timestamp")),
-            level=LogLevel(str(_pick(value, "level"))),
+            level=_enum(LogLevel, _pick(value, "level")),
             message=str(_pick(value, "message")),
             fields=_string_map(value.get("fields")),
         )
@@ -358,7 +343,7 @@ class FileInfo:
         return cls(
             name=str(_pick(value, "name")),
             path=str(_pick(value, "path")),
-            type=file_type or FileType(str(_pick(value, "type", default="file"))),
+            type=file_type or _enum(FileType, _pick(value, "type", default="file")),
             size=_integer(_pick(value, "size", default=0)),
             mode=_optional_int(value.get("mode")),
             permissions=_optional_str(value.get("permissions")),
@@ -462,7 +447,7 @@ class TemplateAliasInfo:
 @dataclass(frozen=True, slots=True)
 class TemplateFileInfo:
     exists: bool
-    upload_url: str | None = None
+    upload_url: str | None = field(default=None, repr=False)
 
     @classmethod
     def from_wire(cls, value: Mapping[str, Any]) -> TemplateFileInfo:
@@ -511,19 +496,6 @@ class NodeInfo:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class HealthInfo:
-    status: str
-    message: str | None = None
-
-    @classmethod
-    def from_wire(cls, value: Mapping[str, Any]) -> HealthInfo:
-        return cls(
-            status=str(_pick(value, "status")),
-            message=_optional_str(value.get("message")),
-        )
-
-
 T = TypeVar("T")
 
 
@@ -537,7 +509,7 @@ class Page(Generic[T]):
 def parse_datetime(value: object) -> datetime:
     parsed = parse_optional_datetime(value)
     if parsed is None:
-        raise ValueError("timestamp is required")
+        raise ProtocolError("DevBox response timestamp is missing")
     return parsed
 
 
@@ -546,10 +518,13 @@ def parse_optional_datetime(value: object) -> datetime | None:
         return None
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-    if isinstance(value, int | float):
-        return datetime.fromtimestamp(value, timezone.utc)
-    text = str(value).replace("Z", "+00:00")
-    parsed = datetime.fromisoformat(text)
+    try:
+        if isinstance(value, int | float):
+            return datetime.fromtimestamp(value, timezone.utc)
+        text = str(value).replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(text)
+    except (OSError, OverflowError, ValueError) as error:
+        raise ProtocolError("DevBox returned an invalid timestamp") from error
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
@@ -559,7 +534,7 @@ def _pick(value: Mapping[str, Any], *keys: str, default: object = ...) -> object
             return value[key]
     if default is not ...:
         return default
-    raise ValueError(f"response field is missing: {keys[0]}")
+    raise ProtocolError(f"DevBox response field is missing: {keys[0]}")
 
 
 def _string_map(value: object) -> Mapping[str, str]:
@@ -594,7 +569,7 @@ def _mapping_items(value: object) -> tuple[Mapping[str, Any], ...]:
 
 def _required_mapping(value: object) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
-        raise ValueError("response field is not an object")
+        raise ProtocolError("DevBox response field is not an object")
     return value
 
 
@@ -643,11 +618,27 @@ def _integer(value: object) -> int:
     if isinstance(value, float):
         return int(value)
     if isinstance(value, str | bytes | bytearray):
-        return int(value)
-    raise ValueError("response value is not an integer")
+        try:
+            return int(value)
+        except ValueError as error:
+            raise ProtocolError("DevBox response value is not an integer") from error
+    raise ProtocolError("DevBox response value is not an integer")
 
 
 def _number(value: object) -> float:
     if isinstance(value, int | float | str | bytes | bytearray):
-        return float(value)
-    raise ValueError("response value is not a number")
+        try:
+            return float(value)
+        except ValueError as error:
+            raise ProtocolError("DevBox response value is not a number") from error
+    raise ProtocolError("DevBox response value is not a number")
+
+
+E = TypeVar("E", bound=Enum)
+
+
+def _enum(enum_type: type[E], value: object) -> E:
+    try:
+        return enum_type(str(value))
+    except ValueError as error:
+        raise ProtocolError(f"DevBox returned an invalid {enum_type.__name__}") from error

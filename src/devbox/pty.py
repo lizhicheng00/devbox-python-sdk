@@ -30,17 +30,14 @@ class Pty:
     ) -> CommandHandle:
         size = size or PtySize()
         environment = {"TERM": "xterm-256color", "LANG": "C.UTF-8", **dict(envs or {})}
-        body: dict[str, object] = {
-            "process": {
-                "cmd": command,
-                "args": ["-i", "-l"] if command == "/bin/bash" else [],
-                "envs": environment,
-            }
+        process: dict[str, object] = {
+            "cmd": command,
+            "args": ["-i", "-l"] if command == "/bin/bash" else [],
+            "envs": environment,
         }
         if cwd:
-            process = body["process"]
-            assert isinstance(process, dict)
             process["cwd"] = cwd
+        body = {"process": process}
         return self._commands._start(body, timeout=None, user=user, pty=size, input_stream="pty")
 
     def connect(
@@ -50,8 +47,15 @@ class Pty:
         on_data: OutputHandler | None = None,
         timeout: float | None = None,
     ) -> CommandResult:
-        return CommandHandle(pid, self._commands, input_stream="pty").wait(
-            timeout=timeout, on_stdout=on_data, on_stderr=on_data, check=False
+        return CommandHandle(
+            pid,
+            self._commands,
+            self._commands._connect_events(pid, timeout),
+            input_stream="pty",
+        ).wait(
+            on_stdout=on_data,
+            on_stderr=on_data,
+            check=False,
         )
 
     def resize(self, pid: int, size: PtySize) -> None:
@@ -84,17 +88,14 @@ class AsyncPty:
     ) -> AsyncCommandHandle:
         size = size or PtySize()
         environment = {"TERM": "xterm-256color", "LANG": "C.UTF-8", **dict(envs or {})}
-        body: dict[str, object] = {
-            "process": {
-                "cmd": command,
-                "args": ["-i", "-l"] if command == "/bin/bash" else [],
-                "envs": environment,
-            }
+        process: dict[str, object] = {
+            "cmd": command,
+            "args": ["-i", "-l"] if command == "/bin/bash" else [],
+            "envs": environment,
         }
         if cwd:
-            process = body["process"]
-            assert isinstance(process, dict)
             process["cwd"] = cwd
+        body = {"process": process}
         return await self._commands._start(
             body, timeout=None, user=user, pty=size, input_stream="pty"
         )
@@ -106,8 +107,15 @@ class AsyncPty:
         on_data: AsyncOutputHandler | None = None,
         timeout: float | None = None,
     ) -> CommandResult:
-        return await AsyncCommandHandle(pid, self._commands, input_stream="pty").wait(
-            timeout=timeout, on_stdout=on_data, on_stderr=on_data, check=False
+        return await AsyncCommandHandle(
+            pid,
+            self._commands,
+            await self._commands._connect_events(pid, timeout),
+            input_stream="pty",
+        ).wait(
+            on_stdout=on_data,
+            on_stderr=on_data,
+            check=False,
         )
 
     async def resize(self, pid: int, size: PtySize) -> None:
