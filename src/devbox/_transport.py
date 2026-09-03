@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 
+from ._tls import service_ssl_context
 from ._version import __version__
 from .errors import ProtocolError, raise_connect_error, raise_for_response, transport_error
 
@@ -34,6 +35,7 @@ class SyncTransport:
             headers=request_headers,
             timeout=timeout,
             transport=transport,
+            verify=service_ssl_context(),
         )
 
     def request(
@@ -193,6 +195,7 @@ class AsyncTransport:
             headers=request_headers,
             timeout=timeout,
             transport=transport,
+            verify=service_ssl_context(),
         )
 
     async def request(

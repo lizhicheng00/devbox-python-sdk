@@ -1,38 +1,25 @@
 from __future__ import annotations
 
-import argparse
 import os
 import sys
 from collections.abc import Mapping
-
-import httpx
 
 from devbox import CommandHandle, CommandResult, DevBoxError, Sandbox
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Validate the DevBox runtime API")
-    parser.add_argument(
-        "-k",
-        "--insecure-manager",
-        action="store_true",
-        help="allow the Manager to use an untrusted development certificate",
-    )
-    args = parser.parse_args()
     sandbox_id = os.getenv("DEVBOX_SANDBOX_ID", "").strip()
     created = not sandbox_id
     template = os.getenv("DEVBOX_TEST_TEMPLATE", "default")
-    http_transport = httpx.HTTPTransport(verify=not args.insecure_manager)
 
     try:
         sandbox = (
-            Sandbox.connect(sandbox_id, timeout=300, http_transport=http_transport)
+            Sandbox.connect(sandbox_id, timeout=300)
             if sandbox_id
             else Sandbox.create(
                 template,
                 timeout=300,
                 metadata={"sdk_validation": "true"},
-                http_transport=http_transport,
             )
         )
     except DevBoxError as error:
