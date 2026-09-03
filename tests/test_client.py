@@ -6,6 +6,9 @@ import httpx
 import pytest
 
 from devbox import AsyncDevBox, DevBox, NetworkConfig, RateLimitError, SandboxState
+from devbox.errors import ProtocolError
+from devbox.models import SandboxConnection
+from devbox.sandbox import _gateway_url
 
 
 def test_create_uses_manager_contract() -> None:
@@ -149,6 +152,27 @@ async def test_async_client_uses_same_contract() -> None:
     ) as api:
         sandbox = await api.sandboxes.create()
     assert sandbox.sandbox_id == "sbx_async"
+
+
+def test_https_gateway_url_can_override_manager_placeholder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEVBOX_GATEWAY_URL", "https://gateway.example.test/")
+    connection = SandboxConnection(
+        sandbox_id="sbx_123",
+        gateway_url="https://sbx_123.sandbox.devbox.local",
+        access_token="token",
+    )
+
+    assert _gateway_url(connection) == "https://gateway.example.test"
+
+
+def test_gateway_url_override_requires_https(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEVBOX_GATEWAY_URL", "http://gateway.example.test")
+    connection = SandboxConnection("sbx_123", "", "token")
+
+    with pytest.raises(ProtocolError, match="must start with https"):
+        _gateway_url(connection)
 
 
 def client(handler: object) -> DevBox:

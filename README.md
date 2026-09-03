@@ -234,6 +234,7 @@ All exceptions inherit from `DevBoxError` and expose `code`, `status_code`,
 | --- | --- | --- |
 | API key | `DEVBOX_API_KEY` or `E2B_API_KEY` | required |
 | Control-plane URL | `DEVBOX_API_URL` or `E2B_API_URL` | `https://devbox.developer.myhuaweicloud.com` |
+| Data-plane URL override | `DEVBOX_GATEWAY_URL` | Manager response |
 | Request timeout | constructor argument | 30 seconds |
 
 Constructor arguments take precedence over `DEVBOX_*`, followed by E2B-compatible

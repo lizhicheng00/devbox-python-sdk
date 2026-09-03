@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -863,6 +864,12 @@ def _gateway_headers(connection: SandboxConnection) -> dict[str, str]:
 
 
 def _gateway_url(connection: SandboxConnection) -> str:
+    configured_url = os.getenv("DEVBOX_GATEWAY_URL", "").strip().rstrip("/")
+    if configured_url:
+        if not configured_url.startswith("https://"):
+            raise ProtocolError("DEVBOX_GATEWAY_URL must start with https://")
+        return configured_url
+
     url = connection.gateway_url
     if not url:
         raise ProtocolError("sandbox response does not provide an EnvD endpoint")
