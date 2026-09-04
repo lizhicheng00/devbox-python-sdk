@@ -80,6 +80,20 @@ def test_list_uses_envd_rpc_shape() -> None:
     assert entries[0].type is FileType.DIRECTORY
 
 
+def test_watch_reads_envd_top_level_event() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _stream_response(
+            {"start": {}},
+            {"filesystem": {"name": "created.txt", "type": "EVENT_TYPE_CREATE"}},
+        )
+
+    with _transport(handler) as transport:
+        events = Filesystem(lambda: transport).watch("/tmp")
+        event = next(events)
+
+    assert event["name"] == "created.txt"
+
+
 def test_exists_maps_not_found_to_false() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -105,3 +119,13 @@ def _transport(handler: Any) -> SyncTransport:
         timeout=30,
         transport=httpx.MockTransport(handler),
     )
+
+
+def _stream_response(*events: dict[str, object]) -> httpx.Response:
+    body = b"".join(_frame(event) for event in events) + _frame({}, flags=2)
+    return httpx.Response(200, content=body, headers={"Content-Type": "application/connect+json"})
+
+
+def _frame(value: dict[str, object], *, flags: int = 0) -> bytes:
+    data = json.dumps(value, separators=(",", ":")).encode()
+    return bytes([flags]) + len(data).to_bytes(4, "big") + data

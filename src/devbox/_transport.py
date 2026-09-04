@@ -120,6 +120,7 @@ class SyncTransport:
                 headers=request_headers,
                 timeout=_stream_timeout(timeout),
             ) as response:
+                _reject_redirect(response)
                 if response.is_error:
                     response.read()
                     raise_for_response(response)
@@ -163,6 +164,7 @@ class SyncTransport:
                     params=params,
                     headers=headers,
                 )
+                _reject_redirect(response)
                 if response.is_error:
                     raise_for_response(response)
                 return response
@@ -278,6 +280,7 @@ class AsyncTransport:
                 headers=request_headers,
                 timeout=_stream_timeout(timeout),
             ) as response:
+                _reject_redirect(response)
                 if response.is_error:
                     await response.aread()
                     raise_for_response(response)
@@ -322,6 +325,7 @@ class AsyncTransport:
                     params=params,
                     headers=headers,
                 )
+                _reject_redirect(response)
                 if response.is_error:
                     raise_for_response(response)
                 return response
@@ -334,6 +338,11 @@ class AsyncTransport:
                     raise
                 raise mapped from error
         raise AssertionError("request retry loop did not return")
+
+
+def _reject_redirect(response: httpx.Response) -> None:
+    if response.is_redirect:
+        raise ProtocolError("DevBox service returned an unexpected redirect")
 
 
 class _ConnectDecoder:

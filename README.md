@@ -217,6 +217,14 @@ foreground and background commands, process listing, and filesystem operations,
 then deletes the test sandbox. Set `DEVBOX_SANDBOX_ID` only when an existing sandbox
 should be reused instead.
 
+## Full Validation
+
+Run `examples/validate_full.py` for a zero-input phase-one acceptance check. It
+creates one temporary sandbox and validates the published Manager lifecycle plus
+commands, process interaction and reconnection, filesystem transfer and watching,
+PTY, and a local Git workflow. It reports a single runtime gateway failure instead
+of cascading data-plane errors, and deletes the sandbox even when a check fails.
+
 ## Errors
 
 HTTP failures are mapped to typed exceptions:

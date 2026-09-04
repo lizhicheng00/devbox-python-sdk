@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 import devbox._transport as transport_module
-from devbox import ServiceUnavailableError
+from devbox import ProtocolError, ServiceUnavailableError
 from devbox._transport import AsyncTransport, SyncTransport
 
 
@@ -47,6 +47,28 @@ def test_does_not_hide_programming_errors() -> None:
 
     with _transport(handler) as transport, pytest.raises(RuntimeError, match="broken callback"):
         transport.request("GET", "/sandboxes")
+
+
+def test_rejects_redirects() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"Location": "https://login.test"})
+
+    with (
+        _transport(handler) as transport,
+        pytest.raises(ProtocolError, match="unexpected redirect"),
+    ):
+        transport.request("GET", "/sandboxes")
+
+
+def test_connect_stream_rejects_redirects() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"Location": "https://login.test"})
+
+    with (
+        _transport(handler) as transport,
+        pytest.raises(ProtocolError, match="unexpected redirect"),
+    ):
+        next(transport.connect_stream("/process.Process/Start", {}))
 
 
 @pytest.mark.asyncio

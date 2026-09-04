@@ -222,10 +222,10 @@ def _filesystem_events(
 
 
 def _filesystem_event(response: Mapping[str, Any]) -> Mapping[str, Any] | None:
-    event = response.get("event")
-    if not isinstance(event, Mapping):
-        return None
-    value = event.get("filesystem")
+    value = response.get("filesystem")
+    if value is None:
+        event = response.get("event")
+        value = event.get("filesystem") if isinstance(event, Mapping) else None
     return value if isinstance(value, Mapping) else None
 
 
