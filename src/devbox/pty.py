@@ -6,12 +6,10 @@ from ._transport import AsyncTransport, SyncTransport
 from .commands import (
     AsyncCommandHandle,
     AsyncCommands,
-    AsyncOutputHandler,
     CommandHandle,
     Commands,
-    OutputHandler,
 )
-from .models import CommandResult, PtySize
+from .models import PtySize
 
 
 class Pty:
@@ -44,18 +42,14 @@ class Pty:
         self,
         pid: int,
         *,
-        on_data: OutputHandler | None = None,
         timeout: float | None = None,
-    ) -> CommandResult:
+    ) -> CommandHandle:
         return CommandHandle(
             pid,
             self._commands,
             self._commands._connect_events(pid, timeout),
             input_stream="pty",
-        ).wait(
-            on_stdout=on_data,
-            on_stderr=on_data,
-            check=False,
+            reconnect_timeout=timeout,
         )
 
     def resize(self, pid: int, size: PtySize) -> None:
@@ -104,18 +98,14 @@ class AsyncPty:
         self,
         pid: int,
         *,
-        on_data: AsyncOutputHandler | None = None,
         timeout: float | None = None,
-    ) -> CommandResult:
-        return await AsyncCommandHandle(
+    ) -> AsyncCommandHandle:
+        return AsyncCommandHandle(
             pid,
             self._commands,
             await self._commands._connect_events(pid, timeout),
             input_stream="pty",
-        ).wait(
-            on_stdout=on_data,
-            on_stderr=on_data,
-            check=False,
+            reconnect_timeout=timeout,
         )
 
     async def resize(self, pid: int, size: PtySize) -> None:

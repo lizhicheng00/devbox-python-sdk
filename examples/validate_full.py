@@ -225,6 +225,9 @@ def validate_pty(sandbox: Sandbox, validator: Validator) -> None:
 def _validate_pty(sandbox: Sandbox) -> None:
     session = sandbox.pty.start(size=PtySize(rows=24, cols=80))
     sandbox.pty.resize(session.pid, PtySize(rows=30, cols=100))
+    pid = session.pid
+    session.disconnect()
+    session = sandbox.pty.connect(pid)
     session.send_stdin("printf 'pty-ok\\n'; exit\n")
     result = session.wait(check=False)
     _expect(result.exit_code == 0, f"PTY exited with status {result.exit_code}")

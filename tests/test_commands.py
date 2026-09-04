@@ -98,6 +98,14 @@ def test_background_callbacks_are_attached_when_waiting() -> None:
             )
 
 
+def test_rejects_unknown_signal() -> None:
+    with (
+        _transport(lambda request: httpx.Response(200, json={})) as transport,
+        pytest.raises(ValueError, match="SIGTERM or SIGKILL"),
+    ):
+        Commands(lambda: transport).send_signal(42, "SIGNAL_UNKNOWN")
+
+
 @pytest.mark.asyncio
 async def test_async_command_uses_the_same_protocol() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:

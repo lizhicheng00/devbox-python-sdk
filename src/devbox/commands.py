@@ -26,11 +26,13 @@ class CommandHandle:
         events: Iterator[Mapping[str, Any]] | None = None,
         *,
         input_stream: str = "stdin",
+        reconnect_timeout: float | None = 60,
     ) -> None:
         self.pid = pid
         self._commands = commands
         self._events = events
         self._input_stream = input_stream
+        self._reconnect_timeout = reconnect_timeout
         self._result: CommandResult | None = None
 
     def wait(
@@ -42,7 +44,9 @@ class CommandHandle:
     ) -> CommandResult:
         """Wait for completion and collect the command output."""
         if self._result is None:
-            events = self._events or self._commands._connect_events(self.pid, 60)
+            events = self._events or self._commands._connect_events(
+                self.pid, self._reconnect_timeout
+            )
             self._events = None
             self._result = self._commands._collect_events(events, self.pid, on_stdout, on_stderr)
         if check and self._result.exit_code != 0:
@@ -130,7 +134,12 @@ class Commands:
 
     def connect(self, pid: int, *, timeout: float | None = 60) -> CommandHandle:
         _validate_pid(pid)
-        return CommandHandle(pid, self, self._connect_events(pid, timeout))
+        return CommandHandle(
+            pid,
+            self,
+            self._connect_events(pid, timeout),
+            reconnect_timeout=timeout,
+        )
 
     def list(self) -> tuple[ProcessInfo, ...]:
         payload = self._transport().connect_unary(f"{_PROCESS}/List", {})
@@ -169,7 +178,13 @@ class Commands:
             headers=_process_headers(user),
         )
         pid = _first_pid(events, "start process")
-        return CommandHandle(pid, self, events, input_stream=input_stream)
+        return CommandHandle(
+            pid,
+            self,
+            events,
+            input_stream=input_stream,
+            reconnect_timeout=timeout,
+        )
 
     def _connect_events(self, pid: int, timeout: float | None) -> Iterator[Mapping[str, Any]]:
         events = self._transport().connect_stream(
@@ -214,11 +229,13 @@ class AsyncCommandHandle:
         events: AsyncIterator[Mapping[str, Any]] | None = None,
         *,
         input_stream: str = "stdin",
+        reconnect_timeout: float | None = 60,
     ) -> None:
         self.pid = pid
         self._commands = commands
         self._events = events
         self._input_stream = input_stream
+        self._reconnect_timeout = reconnect_timeout
         self._result: CommandResult | None = None
 
     async def wait(
@@ -229,7 +246,9 @@ class AsyncCommandHandle:
         check: bool = True,
     ) -> CommandResult:
         if self._result is None:
-            events = self._events or await self._commands._connect_events(self.pid, 60)
+            events = self._events or await self._commands._connect_events(
+                self.pid, self._reconnect_timeout
+            )
             self._events = None
             self._result = await self._commands._collect_events(
                 events, self.pid, on_stdout, on_stderr
@@ -321,7 +340,12 @@ class AsyncCommands:
 
     async def connect(self, pid: int, *, timeout: float | None = 60) -> AsyncCommandHandle:
         _validate_pid(pid)
-        return AsyncCommandHandle(pid, self, await self._connect_events(pid, timeout))
+        return AsyncCommandHandle(
+            pid,
+            self,
+            await self._connect_events(pid, timeout),
+            reconnect_timeout=timeout,
+        )
 
     async def list(self) -> tuple[ProcessInfo, ...]:
         transport = await self._transport()
@@ -364,7 +388,13 @@ class AsyncCommands:
             headers=_process_headers(user),
         )
         pid = await _first_pid_async(events, "start process")
-        return AsyncCommandHandle(pid, self, events, input_stream=input_stream)
+        return AsyncCommandHandle(
+            pid,
+            self,
+            events,
+            input_stream=input_stream,
+            reconnect_timeout=timeout,
+        )
 
     async def _connect_events(
         self, pid: int, timeout: float | None
@@ -542,7 +572,7 @@ def _items(payload: object, key: str) -> tuple[Mapping[str, Any], ...]:
 
 def _signal(value: str) -> str:
     normalized = value.upper()
-    if normalized.startswith("SIGNAL_"):
+    if normalized in {"SIGNAL_SIGTERM", "SIGNAL_SIGKILL"}:
         return normalized
     if normalized in {"SIGTERM", "SIGKILL"}:
         return f"SIGNAL_{normalized}"

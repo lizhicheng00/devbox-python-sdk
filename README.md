@@ -146,7 +146,11 @@ from devbox import PtySize
 session = sandbox.pty.start("/bin/bash", size=PtySize(rows=30, cols=100))
 session.send_stdin("ls -la\n")
 sandbox.pty.resize(session.pid, PtySize(rows=40, cols=120))
-sandbox.pty.connect(session.pid, on_data=lambda data: print(data, end=""))
+session.disconnect()
+
+session = sandbox.pty.connect(session.pid)
+session.send_stdin("exit\n")
+session.wait(on_stdout=lambda data: print(data, end=""), check=False)
 ```
 
 The returned process ID can be stored and used to reconnect while the sandbox and
